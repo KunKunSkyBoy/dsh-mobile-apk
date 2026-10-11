@@ -24,7 +24,9 @@ class LogSanitizerTest {
   private val apiKeyValue = "AIzaSyD-EXAMPLE-1234567890abcdef"
   private val sessionToken = "ZPBs2spM1bfLo10cQwEOjV13FvNHBRE0fWd-hGKUG_U"
   private val password = "hunter2-SuperSecret"
-  private val ghToken = "ghp_AbCdEfGh1234567890AbCdEfGh1234567890"
+  // 长度刻意 <20：足以触发脱敏器 ghp_ 规则（要求 ≥8），但不命中 CI 敏感信息扫描器的
+  // ghp_[A-Za-z0-9]{20,} 形态——夹具不是真实凭据，不该逼安全门禁放宽。
+  private val ghToken = "ghp_AbCdEfGh1234567"
 
   @Test
   fun vendorPrefixedKeysAreMasked() {
