@@ -101,7 +101,7 @@ sequenceDiagram
 ### 阶段 4：后台维护（低频）
 
 - 看门狗持续探活/退避/熔断（`WatchdogV2.kt:109`）；日志采集与轮转（`LogCollector`）；
-- 在线更新：EngineStartFlow.startUpdateCheck→UpdateChecker/UpdateManager，manifest未配置仍fail-closed；当前职责见§6 K03。
+- APK 更新：引导页/设置页经 `AndroidBridge.apkUpdate(action)` 驱动 `ApkUpdateController`（唯一状态机与推进者）→ `UpdateChecker` 下载校验 → 系统安装器；快照更新链已下线，`startUpdateCheck` 在本版**已无任何调用点**（定义保留于 `EngineStartFlow.kt:549`；`UpdateManagerPolicyTest.kt:58` 与 `ForegroundPageRecoveryWiringTest.kt:47` 按该签名切片，**不得当死代码删除**）。manifest 未配置仍 fail-closed；当前职责见§6 K03。
 - 残渣回收与标记恢复（`SnapshotTransaction.kt:190` / `EngineManager.kt:238`）。
 
 ### 横向：构建与验收链
@@ -344,7 +344,7 @@ sequenceDiagram
 - [P04] 2. 【已确认（代码面），一致性】linux-env 的两条 env 路由没有走 `ctx.effect`：`plugins/dsh-android-linux-env/src/index.ts:349-376` 在 `for` 循环里直接 `wsvc.register(...)`，而同文件 `:342` 的注释明确要求「热重载/卸载必须回收路由，不留重复 handler」，同文件 `:386/:400` 的 runtime-cache 路由与 file-open 五条（`plugins/dsh-android-file-open/src/index.ts:525/603/695/750/811`）都用了 `ctx.effect`。触发条件=热重载或卸载本插件；影响=旧 handler 残留、同名路由重复注册（未在设备上复现，运行期影响未证实）。
 - [P04] 3. 【已确认（代码 + 目录快照实测），写回口径】`mergeCatalog` 给模型设 `model.compat` 时不写 `model.sources`（`plugins/dsh-model-capability/src/index.ts:166-169`），而 `report.unknown` 按 `sources` 是否为空判定（`:195-198`）；按真实算法在 `plugins/dsh-model-capability/lib/catalog-snapshot.json` 上实测：181 / 961 个模型 id 会落到「有 dialect、无 thinkingLevelMap」。于是 `model_capability_apply`（offline 默认 true）会把 `compat.thinkingFormat` 等写进 settings，同时工具文本把这批模型列进「未获得能力元数据：…」——报告与实际写入自相矛盾（触发条件：路由声明了这批 id 之一并调用 apply）。
 - [P04] 4. 【已确认（代码面），配置写入面】`planModelPatch` 把字符串形态的模型条目规范化成对象（`plugins/dsh-model-capability/src/settings-writer.ts:134`），而第 181 行的判据 `changes.length > 0 || next !== entry` 中 `next !== entry` 恒真（`next` 是新对象）→ 只要该 id 命中 patch，条目必被替换；若同一次调用里该路由另有字段被写，用户写的 `models: ['a','b']` 会被改写成 `[{id:'a'},…]`（值不变、representation 变）。同函数 `changes` 跨 patch 累积，判据本身形同虚设（可单测复现）。
-- [P04] 5. 【已确认（代码面），存储面】诊断轨迹默认开启且 `tick()` 在早退前无条件写一行（`plugins/dsh-model-capability/src/index.ts:105-113` 与 `:462`，interval 见 `:474`），默认每 5 秒一次 → `$DSH_HOME/model-capability.log` 约 1.7 万行/天、无轮转、无上限；它不在运行时缓存白名单里（`plugins/dsh-android-linux-env/src/runtime-cache.ts:59` 的 `CACHE_SUBDIR_ALLOW` 为空集、`:73` 的 `HOME_CACHE_ALLOW` 只有 `.node-compile-cache`），所以本块新上线的「清除运行时缓存」收不回这份增长。
+- [P04] 5. 【2026-10-11 已修；原条目为历史记录】曾：诊断轨迹默认开启且 `tick()` 在早退前无条件写一行、**每 5 秒**一次 → `$DSH_HOME/model-capability.log` 约 1.7 万行/天、无轮转、无上限。**现已两条都改掉**：0.14.2 把 5 秒改成 120 秒兜底（仍每轮无条件写一行），本轮 A7 又把**定时器整体移除** ⇒ 现为**纯事件驱动，全插件无任何定时器**：唯一触发是 settings 保存同步 emit 的 `settings/document-updated`（另有启动期一次首读基线 `tick(false)`，同样**不排任何定时器**；无路由时留待下次保存自然补上）。写日志也改为**只在真有事发生**时（原「早退前无条件写一行」已删）⇒ 不再有常驻 tick、不再每天 1.7 万行。**仍成立的部分**：日志仍无轮转/无上限（`diag` 见 `plugins/dsh-model-capability/src/index.ts:181-185`，`DSH_MODEL_CAPABILITY_TRACE=0` 可关）；且它**仍不在**运行时缓存白名单里（`plugins/dsh-android-linux-env/src/runtime-cache.ts:59` 的 `CACHE_SUBDIR_ALLOW` 为空集、`:73` 的 `HOME_CACHE_ALLOW` 只有 `.node-compile-cache`），所以「清除运行时缓存」仍收不回这份增长——增长速率由每天 1.7 万行降为「每次保存若干行」。
 - [S01] `dsh-host-web-compat/scripts/smoke-injections.mjs:50` + `dsh-host-web-compat/lib/index.js:783,791`（已确认，静态可推）：脚本断言 `transforms.length === 1`，而 `apply()` 现在注册两次 `tapIndex`（polyfill 块 + 静态占位块）→ 该断言必红、`npm test` 与子仓 PR gate 的「注入冒烟」整条红。这是坑 61 防线③（门禁）与源码脱同步；apk 仓自己的 `.github/workflows` 不跑这个脚本，所以本仓 CI 不会暴露。修法：断言改 `>= 1` 或按哨兵分别断言。
 - [S01] **2026-09-25 已修（D2/D4 + D8）**：附件来源菜单此前既**不是返回栈的一层**（`back-stack.ts:94` 只认 `[data-trigger-menu]`；系统返回键不产生 pointerdown/Escape，`BackGate.decide` 在「无历史 + 无层」时给 `FINISH_ACTIVITY`，`BackGate.kt:56-60` → 菜单开着按返回直接退应用），又**劫持了上游加号**（旧 `paperclipInput()` 按「隐藏 file input 之前最近的 BUTTON」认领，0.1.7-rc.1 里那个 BUTTON 正是 `aria-haspopup=listbox` 的指令加号，onClickCapture 的 preventDefault + stopImmediatePropagation 吃掉 `onToggleCommandMenu` → 指令菜单永不打开、回形针消失）。现修法：不再认领任何上游按钮（`attachment-picker-menu.ts:184` 只给自有触发器装 listener），自有回形针挂标准插槽 `conversation.input.left` 的 `[data-slot]` 锚点（`:173`、挂载为 `display:contents`，不改上游 InputBar），并把该菜单登记为返回栈一层（`back-stack.ts:521` 的 `detectAttachmentMenu`，元素即 `ATTACHMENT_MENU_SELECTOR`（`back-stack.ts:103`））。回归判据：`dsh-client-ui-responsive/tests/attachment-picker-menu.spec.ts:80`（加号自身的 onClick 必须被调用一次且事件未被取消）、`back-stack.spec.ts:259`（`__dshBackKinds` 含 `attachment-menu` 且 `__dshBack()` 关菜单而不是退应用）。
 - [S01] `dsh-client-ui-responsive/src/client/mobile/native-browser-presentation.ts:44-95`（已确认，COMPAT-REVIEW N-9 已登记；0.14.3 追版后 `publishBounds` 整体迁入本文件）：`publishBounds` 每次都做 `getBoundingClientRect` + `getComputedStyle` + 跨桥 `browserHostBounds`，无「上次元组」去重，而 `watchStageVisibility` 在 `[style,class,hidden,...]` 任意属性变化时按帧触发 → 流式输出期间可能每帧一次桥调用与原生 `setStageBounds`。
@@ -419,6 +419,7 @@ sequenceDiagram
 | K01 | 引擎侧页面契约 | onConsoleMessage 消费 dsh-boot-ready 与 dsh-boot-stall 两个前缀，判据由页面侧 readyWatch 发布 | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:667 |
 | K01 | 来件与选择器 | onCreate 投递 VIEW/SEND 来件，桥回调接 DirectoryPickerController/MediaPickController/FileIncoming | app/src/main/java/com/dsharnessmobile/shell/MainActivity.kt:266 |
 | K01 | 快照与更新面 | 检查更新按钮与启动前快照刷新走 UpdateManager，自动回撤走 UndoGate 加 SnapshotTransaction | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:294 |
+| K01 | APK 更新动作 | 引导页按钮与设置页那一行**读同一份**状态（`ApkUpdateController`，Activity 作用域）；动作经唯一桥入口 `AndroidBridge.apkUpdate(action=status\|check\|install)` 发起，**不占用相位与主按钮**，且壳侧对 `window.__dshBridge` 写入面为 0 | app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228 |
 | K01 | 内置控制台 | 引导页与控制台按钮 START ConsoleActivity，其 ConsoleSession 用与引擎同源的 shellEnv 起快照 bash | app/src/main/java/com/dsharnessmobile/shell/ConsoleSession.kt:33 |
 | K01 | 系统外部角色 | BootReceiver 接 ACTION_BOOT_COMPLETED 决定是否自启前台服务，分享面板经 VIEW/SEND 进本 Activity | app/src/main/java/com/dsharnessmobile/shell/BootReceiver.kt:24 |
 | K02 | K01 | 启动全程用引导页阶段承载文案，成功才切 WebUI | EngineStartFlow.kt:445-479、MainActivity.kt:145-155 |
@@ -430,7 +431,7 @@ sequenceDiagram
 | K02 | ConsoleSession | 复用 usrDir 与 shellEnv 起交互 shell，不起第二个引擎 | ConsoleSession.kt:33-50 |
 | K02 | 门禁 check-boot-budget | files/boot-segments.log 是该门禁的唯一产物 | LogCollector.kt:395-424 |
 | K03 | 引导与启动 | refreshSnapshot 的进度/失败文案与恢复前置由启动流拉起，刷新期 snapshotRefreshing 闸门禁止拉引擎 | app/src/main/java/com/dsharnessmobile/shell/EngineStartFlow.kt:427 |
-| K03 | 引擎探活与看门狗 | 每 5 秒一拍 onEngineProbe 驱动 .update-pending 的 usr-old 确认或回退 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:1344 |
+| K03 | 引擎探活与看门狗 | 每 5 秒一拍 onEngineProbe 驱动 .update-pending 的 usr-old 确认或回退 | app/src/main/java/com/dsharnessmobile/shell/EngineService.kt:348 |
 | K03 | 引擎总管 EngineManager | 事务/残渣/空间的调用方，也是 usr、home、.snapshot-fingerprint 的持有者 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:99 |
 | K03 | 构建与发布 | 内嵌 assets/snapshot.tar.xz 与 snapshot.sha256 是首次解压与刷新两条路径的唯一输入，指纹翻转是刷新触发条件 | app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt:68 |
 | K03 | 插件注入层 | profiles 的 package.json 与 cordis.patch.yml 决定引擎实际挂载集，工厂 disabled 语义以 FactoryProfilePatch 为权威 | app/src/main/java/com/dsharnessmobile/shell/FactoryProfilePatch.kt:79 |
@@ -577,7 +578,8 @@ sequenceDiagram
 | 2. 报「运行时更新失败（诊断已保存）」但看不到原因：`grep -E "存储空间不足|Directory not empty|InsufficientSpace" files/boot-fail.log`；空间类真因只落在 cause 里（UI 文案是通用的），`df /data` 对账；`Directory not empty` 类看 `~/.failed-<ts>` 残渣是否在场。 | K03 | （待补） |
 | 3. 插件列表在、点开不可用（0.14.0 实报形态）：`grep -n "disabled: true" files/home/.dsh/profiles/web/cordis.patch.yml`；查 `files/.profile-patch-repair-<版本名>` 标记是否已写（没写=上次启动修复失败，下轮重试）；对照 `files/home/.dsh/profiles/web/?` 的 node_modules 是否半合并（1/10 形态）。 | K03 | （待补） |
 | 4. 已摘除插件疑似仍在跑：`ls files/home/.dsh/profiles/web/node_modules/@aiwayds`（应为空/不存在）；`grep -n "dsh-model-sync" files/home/.dsh/profiles/web/cordis.patch.yml`；迁移只在发生刷新时执行，指纹未变的老设备需要触发一次刷新。 | K03 | （待补） |
-| 5. 在线更新/APK 更新：`cat files/update-status.txt`（`runUpdate` 逐行追加）、logcat grep `dsh-update`、`ls files/ | grep -E "update-pending|usr-old|update-stage|update.tar.xz"`；`snapshot-fingerprint` 内容与 `assets/snapshot.sha256` 不一致 = 走的不是内嵌链。 | K03 | （待补） |
+| 5. **APK 更新**（用户面，0.14.6 起）：读 `ApkUpdateController` 八态（`idle/checking/up-to-date/available/downloading/installing/need-permission/failed`）；引导页次级提示与设置页那一行读**同一份**状态；logcat grep `dsh-update`。不占主按钮/相位。 | K03 | （待补） |
+| 6. **快照更新 / adb 联调 `runUpdate`**（非用户面）：`cat files/update-status.txt`（`runUpdate` 逐行追加）、`ls files/ | grep -E "update-pending|usr-old|update-stage|update.tar.xz"`；`snapshot-fingerprint` 内容与 `assets/snapshot.sha256` 不一致 = 走的不是内嵌链。注意该路径由 `ACTION_UPDATE`（adb 显式 intent、manifest 未声明）触发且**无超时兜底**，见 known-gaps。 | K03 | （待补） |
 | 1. 「审批卡/提问卡不再弹出，必须重启 App」 | K04 | `adb logcat -d | grep dsh-overlay-mux`（应有 `mux handshake refused 401/403: invalidating + refreshing engine cookie`）+ `adb logcat -d | grep dsh-engine-auth`（`cookie acquired via token exchange` / `cookie minted from credentials grant`）；两条都静默则查 `dsh_engine_auth` prefs 里的 cookie 是否只剩本地未过期的死值。 |
 | 2. 「模型报设备控制超时/未知操作，可壳侧其实已经执行」 | K04 | `adb logcat -d | grep dsh-a11y`（`duplicate delivery skipped (reqId=…)`、`result post failed for <op> (HTTP …)`、`result too_large … L1 fallback`）+ 对比 `dsh-adb.xml → controlToken` 与引擎实时读到的值（不一致恒 403）。 |
 | 3. 「自动回撤到底跑没跑」 | K04 | `adb shell run-as com.dsharnessmobile.shell cat files/undo-gate.log`（前缀 `dsh-undo-gate`：`armed` / `trigger` / `executed ok snapshot=` / `aborted list-timeout` / `skipped no-snapshots` / `suppressed retry-window`），再看 `files/.undo-auto-done` 时间戳与 `files/.undo-auto-armed` 是否残留。 |
@@ -694,6 +696,32 @@ sequenceDiagram
 - **边界**：runtime库/links完整性与snapshotRefreshing仍为启动前闸门；工厂事务与在线事务共用唯一 journal，不能并发；在线更新仅替换usr，legacy `usr-old` 不作新事务归属证明且不由新路径递归删除；profile清单合并不是任意整树覆盖；UndoGate保留既有known-good护栏。
 - **当前锚点**：[SHA](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/SnapshotFingerprintPolicy.kt#L7-L22>)、[fresh/refresh](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt#L103-L154>)、[recover](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt#L325>)、[stage/quarantine/active document](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/SnapshotUserData.kt#L50-L143>)、[配置桥](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/EngineManager.kt#L1218-L1242>)、[客户端失败一次性入口](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/UndoGate.kt#L165-L183>)、[点名唯一可拔条目](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/PluginMounts.kt#L259-L269>)、[外科拔除入口](<dsh-mobile-apk/app/src/main/java/com/dsharnessmobile/shell/PluginMounts.kt#L470-L471>)。
 - **待外验**：假provider/key跨冷启/换树/rollback/中断保留；坏SHA真实终包拒绝；目标0.2 runtime assets重出/双ABI最终字节与hash。历史尺寸/hash不是本轮测量，未构建不填造。
+- **0.14.6 增量：APK 更新路径与不变量（三条主项 + 两个同族派生项）**（可判据，逐条可查）：
+  - **唯一状态机与推进者**：`ApkUpdateController`（`app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt:228`，Activity 作用域）；
+    八态 `idle/checking/up-to-date/available/downloading/installing/need-permission/failed`（`:197-205`）。
+    引导页按钮（`GuidePageRenderer.kt:781` 的 `onButtonPressed`）与设置页那一行经 `observe`（`:344`）**读同一份状态**。
+    唯一桥入口 `AndroidBridge.apkUpdate(action=status|check|install)`（`AndroidBridge.kt:611`）。
+  - **不变量 1（不占用主按钮与相位）**：APK 更新只改次级提示/次级按钮，APK 路径上 `applyGuidePhase` / `primaryButton` 引用数 = 0；
+    「更新中」不再出现在 APK 路径。反例锚点 `UpdateCheckerTest.kt:393`（`updateNeverHijacksPhaseOrPrimaryButton`）。
+  - **不变量 2（收敛由发起方保证）**：超时兜底是发起方责任，`watchdog = Runnable { onTimeout() }`（`ApkUpdateAction.kt:261`）
+    / `armWatchdog`（`:321`）/ `disarmWatchdog`（`:326`）/ `onTimeout`（`:335`）/ `timeoutReason`（纯函数 `:607`）/ `release`（`:344`）；
+    check（`:380`）与 download（`:401`）两处都 arm，任何终态必落如实文案。
+    反例锚点 `UpdateCheckerTest.kt:364`（`timeoutAlwaysConvergesToHonestTerminalText`）。
+  - **不变量 2b（单一真源：`canStart` 与受理判据必须同表达式）**：`canStart` 直接由 state 派生
+    （`snapshotJson` 的 `state == STATE_AVAILABLE`，`:71`），与 `beginDownload()`（`:140`）的受理判据**同一表达式**。
+    旧实现把 `canStart` 绑在一个独立的「有没有待装新版」字段上，其语义**弱于**真实受理条件（`state == available` **且** 该字段非空），
+    于是出现过 `state:"failed"` 与 `canStart:true` 并存 => 页面按契约改发 `install` => 壳侧回 `busy` => 用户点重试恒得
+    「上一次更新动作仍在进行中」而**实际什么都没在跑**（除杀应用无出路）。该字段已删除，运行时由 `invariantViolation()`（`:271`）
+    逐相位断言（`canStart` 必须等于 `s == STATE_AVAILABLE`，`:279-281`）。
+  - **不变量 2c（拒绝必须按真实原因分档，不得笼统报忙）**：`start()`（`:394`）三档 —— 无待装新版回 `no-pending`（`:396`）、
+    真有在途动作回 `busy`（`:398`）、其余（failed/up-to-date 等）回 `not-available`（`:399`）。
+    旧实现只要 `currentResult` 非空就回 `busy`，这正是上述死循环的用户可见形态。
+    **例外（显式化，勿误以为全线都有兜底）**：快照联调路径 `runUpdate`（`EngineStartFlow.kt:1143`）**无超时兜底**；
+    它由 `MainActivity.kt:475-476` 的 `ACTION_UPDATE`（`:197`，manifest 未声明）即 **adb 显式 intent** 触发，普通用户不可达；
+    回执守卫在 `EngineStartFlow.kt:1150`，代次作废即静默丢弃回执、不落终态。见 `docs/AGENTS/known-gaps.md`。
+  - **不变量 3（不碰共享页面桥对象）**：壳侧对 `window.__dshBridge` 写入面 = 0。
+    反例锚点 `UpdateCheckerTest.kt:426`（`updatePathNeverTouchesTheSharedPageBridgeObject`）。
+  - **快照链已下线**：`startUpdateCheck` 无任何调用点（定义保留于 `EngineStartFlow.kt:549`，两个测试按该签名切片，不得当死代码删除）。
 
 #### K04 桥与控制协议面
 
@@ -703,7 +731,7 @@ sequenceDiagram
 
 - **一句话**：页面里的 `window.androidBridge` / `window.dshBackBridge` 方法面，加壳侧两条对引擎的 HTTP/WS 通道（浏览器 cookie 鉴权、控制队列长轮询）与崩溃自动回撤闸门，共同构成「模型动作怎么落到这台手机上、结果怎么回填、出事怎么自救」的底座。
 - **入口/触发**：
-  - 页面 JS 同步调 `window.androidBridge.*`（现状：53 个 `@JavascriptInterface` 注解、52 个唯一方法名，唯一安装点 `MainActivity.kt:719-799`）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:105`）挂在控制台 WebView。
+  - 页面 JS 同步调 `window.androidBridge.*`（现状：71 个 `@JavascriptInterface` 注解、70 个唯一方法名（`browserHostShow` 为重载），唯一安装点 `MainActivity.kt:719-799`；2026-10-11 实测修正，旧值 53/52）与 `window.dshBackBridge.*`（`BackGate.kt:132-148`，仅 2 个方法）；另有 `consoleBridge`（`ConsoleActivity.kt:105`）挂在控制台 WebView。
   - `EngineService.onCreate` → `ControlCarrier.ensureStarted`（`EngineService.kt:43`）；无障碍服务连接时同入口（`DeviceControlService.kt:452-453`）。轮询/心跳由此起步。
   - 任一出厂 HTTP 调用方（`EngineProbe.kt:51`、`DownloadSaver.kt:101`、`NotifyBridge.kt:328`、`OverlayPanel.kt:824`、`OverlayService.kt:580`、`MuxClient.kt:91`）在发请求前向 `EngineAuth` 取值。
   - 看门狗 tick 的 `undoReady`（`EngineService.kt:134`）与启动流（`EngineStartFlow.kt:349`）触发 `UndoGate`。
@@ -1461,7 +1489,7 @@ flowchart TD
   2. 【已确认（代码面），一致性】linux-env 的两条 env 路由没有走 `ctx.effect`：`plugins/dsh-android-linux-env/src/index.ts:349-376` 在 `for` 循环里直接 `wsvc.register(...)`，而同文件 `:342` 的注释明确要求「热重载/卸载必须回收路由，不留重复 handler」，同文件 `:386/:400` 的 runtime-cache 路由与 file-open 五条（`plugins/dsh-android-file-open/src/index.ts:525/603/695/750/811`）都用了 `ctx.effect`。触发条件=热重载或卸载本插件；影响=旧 handler 残留、同名路由重复注册（未在设备上复现，运行期影响未证实）。
   3. 【已确认（代码 + 目录快照实测），写回口径】`mergeCatalog` 给模型设 `model.compat` 时不写 `model.sources`（`plugins/dsh-model-capability/src/index.ts:166-169`），而 `report.unknown` 按 `sources` 是否为空判定（`:195-198`）；按真实算法在 `plugins/dsh-model-capability/lib/catalog-snapshot.json` 上实测：**181 / 961** 个模型 id 会落到「有 dialect、无 thinkingLevelMap」。于是 `model_capability_apply`（offline 默认 true）会把 `compat.thinkingFormat` 等写进 settings，同时工具文本把这批模型列进「未获得能力元数据：…」——报告与实际写入自相矛盾（触发条件：路由声明了这批 id 之一并调用 apply）。
   4. 【已确认（代码面），配置写入面】`planModelPatch` 的旧判据 `changes.length > 0 || next !== entry` 中对象身份恒真且 `changes` 跨 patch 累积，可能把无实际字段写入的字符串模型项规范化。2026-10-05 已改为 per-patch changed 判据并添加回归用例；待插件测试/镜像验证。
-  5. 【已确认（代码面），存储面】诊断轨迹默认开启且 `tick()` 在早退前无条件写一行（`plugins/dsh-model-capability/src/index.ts:105-113` 与 `:462`，interval 见 `:474`），默认每 5 秒一次 → `$DSH_HOME/model-capability.log` 约 1.7 万行/天、无轮转、无上限；它不在运行时缓存白名单里（`plugins/dsh-android-linux-env/src/runtime-cache.ts:59` 的 `CACHE_SUBDIR_ALLOW` 为空集、`:73` 的 `HOME_CACHE_ALLOW` 只有 `.node-compile-cache`），所以本块新上线的「清除运行时缓存」收不回这份增长。
+  5. 【2026-10-11 已修；原条目为历史记录】曾：诊断轨迹默认开启且 `tick()` 在早退前无条件写一行、**每 5 秒**一次 → `$DSH_HOME/model-capability.log` 约 1.7 万行/天。**现已两条都改掉**：0.14.2 改 120 秒兜底，本轮 A7 再**整体移除定时器** ⇒ **纯事件驱动（settings/document-updated），全插件无任何定时器**（启动期仅一次首读基线，同样不排定时器），且不再每轮无条件写日志。**仍成立**：日志无轮转/无上限（`plugins/dsh-model-capability/src/index.ts:181-185`）且不在运行时缓存白名单里（`plugins/dsh-android-linux-env/src/runtime-cache.ts:59`/`:73`），「清除运行时缓存」仍收不回这份增长。
 - **漂移**：
   - 漂移：`app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:326` 注释说「三条 file-incoming exact 路由」（`plugins/dsh-android-file-open/src/index.ts:20` 同样写「三条」），实际注册五条（`plugins/dsh-android-file-open/src/index.ts:527/605/697/752/813`，`scripts/api-route-auth-policy.json` 也列五条），`历史 BRIDGE-API 副本（当前契约见§6 K04）` 按五条记。
   - 漂移：`app/src/main/java/com/dsharnessmobile/shell/FileIncoming.kt:97-99` 注释说「canonical 形态会被插件 `safeResolveInside` 的**词法首门**拒绝」，源码 `plugins/dsh-android-file-open/src/index.ts:431-452` 是**两侧都 realpath 后**比较（只有 ws 侧 realpath 抛错时才回落词法），不存在会拒 canonical 的词法首门——该注释会把维护者引向不必要的路径形态限制。
@@ -1485,7 +1513,7 @@ flowchart TD
   M["设置页清理按钮"] --> N["clean 只删自有清单项"]
   O["开发者选项清除运行时缓存"] --> P["scan 白名单扫描"]
   P --> Q["execute 逐项删并落审计"]
-  R["装配期注册工具与路由"] --> S["model-capability 每 5 秒签名轮询"]
+  R["装配期注册工具与路由"] --> S["model-capability 纯事件驱动：settings/document-updated"]
   S --> T{"目录方言是否统一"}
   T -->|"不统一"| T2["跳过 reasoningEfforts 并记冲突"]
   T -->|"统一"| U["settings.mutate 写 providers 路由 models"]
@@ -2273,6 +2301,9 @@ scripts/deploy-embedded.ps1
 scripts/t0-check.ps1
 scripts/e2e-phone-test.ps1
 scripts/verify-state-sync-modep.test.mjs
+app/src/main/java/com/dsharnessmobile/shell/LogShare.kt
+app/src/main/java/com/dsharnessmobile/shell/LogSanitizer.kt
+app/src/main/java/com/dsharnessmobile/shell/ApkUpdateAction.kt
 -->
 
 ## 8. 历史已知漂移与旧审查线索（当前契约见§6）

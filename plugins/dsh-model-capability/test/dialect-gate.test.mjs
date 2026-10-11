@@ -143,8 +143,10 @@ test('confirmed Responses active probe uses the Responses dialect after passive 
     logger: () => ({}),
     effect: (fn) => { dispose = fn() },
     get: () => undefined,
+    // cordis：可选依赖声明（本用例的 ctx 没有 webServer 服务，回调不会跑）。
+    inject: () => {},
     tools: { register: (tool) => tools.push(tool) },
-  }, { autoApply: false, modelsDev: false, startupDelaySeconds: 3600 })
+  }, { autoApply: false, modelsDev: false })
   t.after(() => { dispose(); globalThis.fetch = originalFetch })
   const tool = tools.find((item) => item.name === 'model_capability_probe')
   const result = await tool.execute({ provider: 'route', source: 'endpoint', active: true, confirm: true })

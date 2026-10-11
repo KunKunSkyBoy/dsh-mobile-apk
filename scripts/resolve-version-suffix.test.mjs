@@ -26,7 +26,10 @@ test('applies an explicit suffix without duplicating the base version', () => {
 })
 
 test('rejects a requested version that disagrees with the Gradle authority', () => {
-  assert.throws(() => resolveVersionSuffix(BASE, '0.14.6'), /must equal Gradle base/)
+  // 反例版本必须与 Gradle 权威版本**恒不相同**：曾经硬编码 '0.14.6'，而当 Gradle base 抬到 0.14.6 后
+  // 该字符串恰好等于 BASE，断言变成「期望抛错却相等通过」——门禁正确地拦下了这次失效。
+  // 用 9.9.9（任何真实版本号都不可能等于它）保持判据不变且不随版本抬升而失效。
+  assert.throws(() => resolveVersionSuffix(BASE, '9.9.9'), /must equal Gradle base/)
   assert.throws(() => resolveVersionSuffix(BASE, '0.14.5-other', '-source'), /does not equal base/)
 })
 

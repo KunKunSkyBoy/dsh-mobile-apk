@@ -30,6 +30,7 @@ internal class GuideChrome(
   val logSummary: TextView,
   val logSection: View,
   val copyLog: TextView,
+  val shareLog: TextView,
   val primaryButton: Button,
   val consoleButton: Button,
   val updateButton: Button,
@@ -44,6 +45,7 @@ internal class GuideCallbacks(
   val onCheckUpdate: () -> Unit,
   val onGrantStorage: () -> Unit,
   val onCopyLog: () -> Unit,
+  val onShareLog: () -> Unit,
 )
 
 internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallbacks): GuideChrome {
@@ -274,6 +276,37 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     letterSpacing = 0.04f
     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
   })
+  // 功能 B（0.14.6）：故障时的「分享诊断包」快捷入口。与「复制」同一观感（强调色小字 +
+  // 按压反馈），不新增区块、不加二次确认（B7）。
+  //
+  // **为什么单独挂在 card 上、而不是塞进 logSection 的 logHeader**（B3 的关键，实测抓出的缺陷）：
+  // logSection 的可见性由 showGuide() 按「engine.log 有没有尾部摘要」决定，缺失即整段 GONE。
+  // 而「引擎起不来、engine.log 根本没生成」恰恰是最需要诊断包的现场——那时入口会被父节点
+  // 一起藏掉，等于功能不存在。故本控件自成一行、直接挂在 card 末尾，可见性只由渲染层的证据
+  // 判据决定，不受日志摘要是否存在影响。
+  //
+  // 为什么构建期**默认 GONE**、由渲染层按证据点亮：不是每次启动都出过故障，常态不该多一个
+  // 入口；而判据（boot-fail/boot-diag/Error 相位）来自文件与相位，构建期拿不到（B1/B3）。
+  val shareLog = TextView(activity).apply {
+    text = activity.getString(R.string.ds_share_log)
+    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+    setTextColor(color(R.color.ds_accent))
+    typeface = typeMedium()
+    // 自成一行、左对齐卡片内容（旧形态在 logHeader 里靠右，现在没有右侧邻居了）；
+    // 垂直方向留内边距保证可点面积。
+    setPadding(0, dp(6f), 0, dp(6f))
+    isClickable = true
+    isFocusable = true
+    setOnClickListener { callbacks.onShareLog() }
+    DsUi.bindPressScale(this, 0.97f)
+    visibility = View.GONE
+    // 自身带内边距与外边距——不依赖任何容器提供留白，因为父节点（card）不随本控件隐藏。
+    val lp = LinearLayout.LayoutParams(
+      ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+    )
+    lp.topMargin = dpix(R.dimen.ds_space_16)
+    layoutParams = lp
+  }
   val copyLog = TextView(activity).apply {
     text = activity.getString(R.string.ds_copy_log)
     setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
@@ -312,6 +345,9 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     addView(logSummary)
   }
   card.addView(logSection)
+  // 分享入口直接挂 card（不挂 logSection）——见 shareLog 处的说明：日志摘要缺失时
+  // logSection 整段隐藏，而那种失败恰恰最需要诊断包（B3）。
+  card.addView(shareLog)
   content.addView(card)
 
   val scroll = ScrollView(activity).apply {
@@ -435,6 +471,7 @@ internal fun buildGuideChrome(activity: ComponentActivity, callbacks: GuideCallb
     logSummary = logSummary,
     logSection = logSection,
     copyLog = copyLog,
+    shareLog = shareLog,
     primaryButton = primaryButton,
     consoleButton = consoleButton,
     updateButton = updateButton,

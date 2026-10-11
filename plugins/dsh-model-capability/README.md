@@ -58,13 +58,67 @@ canonical `low`，selector 固定显示“关闭思考/开启思考”。PiAi se
 返回摘要文本 + 结构化 `report`（`fetched` 审计抓取过的端点、`models[].sources` 标来源、
 `unknown` 列未获元数据的模型、`notes` 记端点自述与丢弃的未知等级词）。
 
-## 自动补给的事件循环边界
+## 触发时机：只在保存时补给，没有任何定时器
 
-自动离线补给在初次描述符投影之后、每条 route 发现之前，以及最终 fresh 签名读取之前
-通过 `setImmediate` 让出事件循环。上游 `describe({ namespaces })` 实际仍做完整 profile/schema
-投影；这些同步工作与目录 JSON 解析叠在同一 turn 曾令 C4 超预算。各阶段保留原描述符
-缓存、写后失效、最新签名重读与 CAS 重试；checkpoint 期间插件销毁则终止后续发现和读写。
-自动路径仍使用 `offline=true`、`allowModelsDevNetwork=false`，主动请求授权条件保持原样。
+自动补给**唯一**的触发源是上游在设置写入后 emit 的 `settings/document-updated`
+（`dsh-settings` 的 `SettingsForms.write` 每次用户保存都 `describe()` 一次，而 describe 在
+raw 段变化时 emit 该事件）。本插件不排 `setTimeout`，也不排 `setInterval`。
+
+收窄口径：事件只带 `(ns, revision)` 不带值，因此插件用「上一轮描述符 vs 本轮描述符」按
+`(route, modelId)` 的**值敏感签名**做 diff（`src/signature.ts` 的 `modelSignatureParts`，
+与自触发签名同源），只对本次保存**新增或改动**的模型做发现与写回。因此：
+
+- 用户在设置页「获取模型列表 → 勾选 → 保存」时，只处理这次实际保存的模型；未勾选的既有模型不动；
+- 只改 `baseURL`/`apiKey` 而模型集合未变时**不触发**任何能力补齐（路由级键不参与模型签名）；
+- 启停之间没有基线可比时（进程刚起、还没读到过描述符）**一律不写**：无法区分「这次新加的模型」
+  与「用户早就在用的模型」，后者不该被自动改写。首读只记录基线。
+- 只处理**非内置** provider（引擎自带目录已声明的网关由上游自己声明，补写只会打架）；
+  内置集合由出货目录快照的 `provider` 字段重建，与上游 `llm-pi-ai` 的 `declared: !catalog.has(provider)` 同源。
+
+历史（为什么去掉定时器）：0.14.2 之前是「每 5 秒全量 describe 取签名」，实测常驻 24-26% CPU；
+0.14.2 改成「启动延迟一轮 + 120 秒兜底轮询」。设备实证（2026-10-10，`$DSH_HOME/model-capability.log`
+380KB）显示后者每 120 秒写一行 tick 日志、连续数日，而该设备当时 `runAutoPass: routes=[]` ——
+零价值工作仍常驻。真因是 `describe` 本身就贵（`settings` 服务没有「只读自有命名空间」的轻量路径，
+每次 `describe` 都走 `configEditor.configuration()` 并对全 profile 每个 entry 重做
+`inherited()` + `structuredClone`，单次实测 300-1500ms），所以「调大间隔」只是摊薄而非消除。
+
+事件循环边界：每次补给在每条 route 发现之前通过 `setImmediate`（`yieldAutoPass`）让出事件循环。
+自动路径使用 `offline=true`、`allowModelsDevNetwork=false`，绝不联网；主动请求授权条件保持原样。
+各阶段保留原描述符缓存、写后失效与 CAS 重试；checkpoint 期间插件销毁则终止后续发现和读写。
+
+## 手动补齐入口（A6）
+
+「早就在用、当时没补过能力」的模型不会再被自动改写（见上节的基线规则），因此需要一个显式入口：
+
+- 宿主路由：`POST /api/android/model-capability/fill`，与其它 Android 自有路由同一道门
+  （`authorizeMobileRoute`：`connection` 服务的 Host/Origin/browser-session 优先，缺 `connection` 时
+  回环 Host + 壳侧实时 controlToken）；已登记 `scripts/api-route-auth-policy.json`。
+- 页面入口：设置页「开发者选项」里紧邻「清除运行时缓存」的一行（复用既有 `dsh-dev-row` 样式，
+  不新增设置分区）。**挂载时不发请求**，只在点击时 POST 一次。
+- 语义：覆盖该插件范围内的全部非内置路由（即用户明确要求的「把我现在这些模型补齐」），
+  但仍遵守字段级写入与「不覆盖用户已有值」，且只写已经在 settings 里声明的模型
+  （`planModelPatch` 不会凭空创建条目）；同样不联网。结果逐路由如实上屏，失败原因不被粉饰。
+
+## 查找语义：L1 精确 → L2 大小写折叠 → L3 分隔符折叠 → L4 不命中
+
+命中即停，且每个折叠层**只在恰好剩下一个候选时**才采用：
+
+| 层 | 规则 | 不采用的条件 |
+|---|---|---|
+| L1 | 与目录键逐字相等（区分大小写） | —— |
+| L2 | 折叠大小写后相等 | 候选 >= 2（判歧义） |
+| L3 | 再折叠 `- _ . /` 与空格后相等 | 候选 >= 2（判歧义） |
+| L4 | 都不成立 | 一律不补，记录 `not-found` / `ambiguous` |
+
+歧义一律不补齐、绝不任取一条：出货目录 1046 个键里有 **37 组**仅大小写不同的重复键，
+且这 37 组的两形态 capabilities **全都不同**（例：`moonshotai/Kimi-K2.5` 的 baseten 形态有
+`thinkingLevelMap` 与 `thinkingFormat=baseten`，huggingface 形态两者皆无，`contextWindow` 也不同）。
+再折叠分隔符会额外引入 49 组新冲突，按同一规则自动退化为「不补齐」——那是期望行为。
+补错能力值（写出与真实网关不符的思考档位/模态）比不补更坏，用户无法察觉。
+
+L1 不做规范化：本来精确可判的输入不能被折叠层抢走（那会把确定结果退化成歧义）。
+目录索引一律走 `Object.hasOwn`，因为模型 id 是用户可控字符串，裸索引会取到
+`Object.prototype` 的成员（`constructor`/`toString`/`__proto__` 等，实测抛 `TypeError`）。
 
 ## 验收边界
 
@@ -77,5 +131,6 @@ canonical `low`，selector 固定显示“关闭思考/开启思考”。PiAi se
 ```powershell
 cd plugins\dsh-model-capability
 npm run build     # tsc
-npm test          # build + 插件本地回归测试
+npm test          # build + 插件本地回归测试（含 A1/A4/A5/A7 的反向判据）
+npm run e2e       # 真实引擎树上的端到端取证（缺引擎树时显式 SKIP，见脚本头部）
 ```
