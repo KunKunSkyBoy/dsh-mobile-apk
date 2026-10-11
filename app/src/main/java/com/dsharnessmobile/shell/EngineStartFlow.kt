@@ -1195,6 +1195,109 @@ internal class EngineStartFlow(private val activity: MainActivity) {
   }
 
   /**
+   * D3（0.14.6）：**安全模式启动**的重启动作——先停本壳托管的旧引擎，再走正常启动流。
+   *
+   * ## 为什么必须有它（真机缺陷链）
+   * `GuidePageRenderer.enterSafeMode()` 此前只调 `activity.startEngineFlow()`。那条路先探活，
+   * 探到旧引擎仍在（OUR_PROCESS / OUR_HTTP）就 early-return 并 `showWeb()`——**从不经过**
+   * EngineManager.startEngine，于是「快照新鲜度」与「live 树完整性」两道既有闸门一次都不执行。
+   * 后果正是用户现场：点「安全模式启动」后 UI 看似拉起，却仍是**旧进程服务旧 manifest**
+   * （清单里还含刚被摘掉的第三方插件条目），页面再次报同样的插件失败，随后一连串报错；
+   * 安全模式这一改**根本没生效**。与 0.14.4 已修的 DEVICE-FINDING-3（startEngine 不带 force ⇒
+   * 早退 ⇒ 继续服务旧 manifest）是同一形态，只是这次发生在安全模式这条路径上。
+   *
+   * ## 复用的既有机制（不新造停止语义）
+   * - 停止：[EngineManager.stopOwnedEngine]——只停**本壳持有句柄**的子进程，绝不按名字杀未归属监听器；
+   * - 判据：[safeModeRestartDecision]（纯函数，JVM 可反证），live 完整性 / 快照就绪 / 归属权
+   *   三种输入各走一条明确结论；
+   * - 启动：仍旧 `activity.startEngineFlow()`，**不绕过**，两道既有闸门照常各过一遍。
+   *
+   * ## 中间态如实（D4）
+   * 旧进程已停、新进程未起这段窗口**不得**显示成已就绪：先切 `Starting` 相位并给如实文案。
+   * 被拒的两条路径必须说清「安全模式的插件改动本次不生效」，并照写 boot-fail——
+   * 既不静默失败，也不隐藏真实失败（D5）。
+   *
+   * 停失败（`stopOwnedEngine()` 返回 false）的处理与 [restart] 一字不差：不继续、如实回执。
+   */
+  internal fun restartOwnedEngineForSafeMode() {
+    if (!canRunEngineWork()) return
+    // **必须离开 UI 线程**：本方法由 GuidePageRenderer.enterSafeMode 的 postDelayed 在**主线程**上调用，
+    // 而下面每一步都有真实阻塞——liveRuntimeComplete() 遍历运行时树（文件系统 IO）、
+    // stopOwnedEngine() 内含最长 1s 的端口/归属探活。原地调用就是一条真实的 ANR 路径
+    // （与 enterSafeMode 里 maybeRecoverFromIncompleteLiveRuntime 的同一教训）。
+    Thread {
+      try {
+        performSafeModeRestart()
+      } catch (t: Throwable) {
+        Log.e("dsh-shell", "safe mode restart failed", t)
+        LogCollector.writeBootFail(activity, "safe-mode-restart-failed",
+          "安全模式重启线程抛出未捕获异常：" + t.javaClass.simpleName + ": " + (t.message ?: "无消息"), t)
+      }
+    }.apply { isDaemon = true; name = "dsh-safe-mode-restart" }.start()
+  }
+
+  /** [restartOwnedEngineForSafeMode] 的线程体（**非 UI 线程**；判据与动作都在这里）。 */
+  private fun performSafeModeRestart() {
+    if (!canRunEngineWork()) return
+    val engine = activity.engineManager
+    val liveComplete = engine.liveRuntimeComplete()
+    val snapshotFresh = engine.snapshotFresh()
+    // 归属权在「停」之前只能由 stopOwnedEngine 的真实返回值回答（它内含探活 + 句柄判定），
+    // 故这里先按 live/快照面判一次；归属失败在下一次判定中收口（见下方 stopOk）。
+    val preDecision = safeModeRestartDecision(liveComplete, snapshotFresh, ownedStopOk = true)
+    if (!safeModeRestartCanProceed(preDecision)) {
+      // live 树残缺：停掉旧进程只会把用户从「能跑但插件错」推到「跑不了」，故**一步都不动**。
+      LogCollector.writeBootFail(
+        activity, "safe-mode-restart-refused",
+        "安全模式重启被拒（decision=" + preDecision + "）：live 运行时树不完整，未停止也未重启引擎；" +
+          "安全模式的插件改动本次不生效。停在可读错误页",
+      )
+      activity.runOnUiThread { applySafeModeRestartHint(preDecision) }
+      return
+    }
+    // 中间态：旧进程即将停止 / 新进程尚未就绪——**不得**显示成已就绪。
+    activity.runOnUiThread {
+      if (canRunEngineWork()) applySafeModeRestartHint(preDecision)
+    }
+    val stopped = try { engine.stopOwnedEngine() } catch (t: Throwable) {
+      LogCollector.writeBootFail(activity, "safe-mode-restart-stop-failed",
+        "安全模式重启：停止旧引擎时抛出 " + t.javaClass.simpleName + ": " + (t.message ?: "无消息"), t)
+      false
+    }
+    if (!stopped) {
+      // 端口未被归属到本壳（或停止失败）：**绝不**继续 spawn，否则等于盲目重启一个不属于我们的监听器。
+      val decision = safeModeRestartDecision(liveComplete, snapshotFresh, ownedStopOk = false)
+      LogCollector.writeBootFail(
+        activity, "safe-mode-restart-not-owned",
+        "安全模式重启被拒（decision=" + decision + "）：3080 未被归属到本壳或旧引擎停止失败，" +
+          "未执行启动以免覆盖未知监听器；安全模式的插件改动本次不生效",
+      )
+      activity.runOnUiThread { applySafeModeRestartHint(decision) }
+      return
+    }
+    // 归零既有账本：用户显式要求「以 safe 状态运行」，就该真的发起一次启动尝试，
+    // 而不是被上一次失败的降级闸门挡住（与手动重试同口径）。
+    engineRetryCount = 0
+    engine.clearRefreshLedger()
+    LogCollector.log("dsh-shell", "safe mode restart: owned engine stopped, starting with the safe profile (decision=" + preDecision + ")")
+    activity.startEngineFlow()
+  }
+
+  /** 安全模式重启的如实回执（相位 + 文案），保证「停旧起新」窗口不被显示成已就绪。 */
+  private fun applySafeModeRestartHint(decision: SafeModeRestartDecision) {
+    val hint = safeModeRestartHint(decision)
+    when {
+      safeModeRestartCanProceed(decision) ->
+        // 放行面：此刻是明确的中间态（旧已停、新未起），相位必须是 Starting 而不是任何就绪态。
+        activity.applyGuidePhase(GuidePhase.Starting, "正在以安全模式重启运行时…", hint)
+      else ->
+        // 拒绝面：停在可读错误页（Error 相位保留「安全模式启动」出口，用户可再次尝试）。
+        activity.applyGuidePhase(GuidePhase.Error, "安全模式未能生效", hint)
+    }
+    activity.showGuide()
+  }
+
+  /**
    * Restart only after the manager proves it can stop its tracked child. Foreign listeners are
    * left untouched and the subsequent spawn is not attempted.
    */
@@ -1610,6 +1713,74 @@ internal fun clientPluginFailureRoute(
   candidate != null -> ClientPluginFailureRoute.CLIENT_PULL
   mountUnchangedSinceHealthy -> ClientPluginFailureRoute.KNOWN_GOOD
   else -> ClientPluginFailureRoute.NO_ACTION
+}
+
+// ── D3（0.14.6）：安全模式重启的纯判定（JVM 可反证）──────────────────────────
+
+/**
+ * 「安全模式启动」这一步重启动作的判定面（[safeModeRestartDecision] 的取值域）。
+ *
+ * 为什么需要单独的判定：安全模式的**全部价值**是「改了装配清单 ⇒ 引擎必须用新清单重建」。
+ * 而 GuidePageRenderer.enterSafeMode 走的是 activity.startEngineFlow()，它内部先探活，
+ * 探到旧引擎还在（OUR_PROCESS / OUR_HTTP）就 early-return 并 showWeb()——**根本不经过**
+ * EngineManager.startEngine，于是两道既有闸门（[EngineStartFlow] 的快照新鲜度判定与
+ * EngineManager 的 live 树完整性闸门）一次都不执行：旧进程继续服务**旧 manifest**，
+ * 页面再次报同样的插件失败（0.14.4 的 DEVICE-FINDING-3 同族形态）。故这里把「可不可以动」
+ * 抽成纯判定，使「绝不在不完整 / 未归属的前提下盲目重启」可逐条反证。
+ *
+ * - [PROCEED]                  live 完整 + 快照就绪 ⇒ 正常重启；
+ * - [PROCEED_SNAPSHOT_STALE]   live 完整 + 快照未就绪 ⇒ **允许**放行（issue #240 的有意降级窗
+ *                              就在这条路上：快照未就绪不等于运行时不可用），中间态文案必须如实；
+ * - [REFUSE_LIVE_INCOMPLETE]   live 树残缺 ⇒ 绝不先停后启（停掉旧进程只会把用户从「能跑但插件错」
+ *                              推到「跑不了」），停在可读错误页；
+ * - [REFUSE_OWNERSHIP]         3080 未被归属到本壳 ⇒ 绝不按名字杀未归属监听器（既有护栏）。
+ */
+internal enum class SafeModeRestartDecision { PROCEED, PROCEED_SNAPSHOT_STALE, REFUSE_LIVE_INCOMPLETE, REFUSE_OWNERSHIP }
+
+/**
+ * 纯判据：安全模式重启该不该放行。
+ *
+ * 判据来源全部复用既有权威口径，不另造：live 完整性 = [EngineManager.liveRuntimeComplete]
+ * （与降级闸门同源）；快照就绪 = [EngineManager.snapshotFresh]（= AGENTS.md 高频雷点 2 的
+ * 「指纹翻转 + 事务文件消失」口径）；归属权 = [EngineManager.stopOwnedEngine] 的返回值。
+ *
+ * **本函数不执行任何动作**，也不替代两道既有闸门：放行之后 startEngineFlow 仍会各自再过一遍
+ * 「快照新鲜度」与「live 树完整性」。它只回答「这一步该不该去停旧进程并重新拉起」。
+ *
+ * @param liveComplete live 运行时树是否完整（缺 node/bin.js/profile 时为 false）
+ * @param snapshotFresh 内嵌快照是否已就绪（指纹新鲜）
+ * @param ownedStopOk 旧进程是否可安全停止（本壳持有句柄）；「动之前」传 true 表示只问 live 面
+ */
+internal fun safeModeRestartDecision(
+  liveComplete: Boolean,
+  snapshotFresh: Boolean,
+  ownedStopOk: Boolean,
+): SafeModeRestartDecision = when {
+  !liveComplete -> SafeModeRestartDecision.REFUSE_LIVE_INCOMPLETE
+  !ownedStopOk -> SafeModeRestartDecision.REFUSE_OWNERSHIP
+  snapshotFresh -> SafeModeRestartDecision.PROCEED
+  else -> SafeModeRestartDecision.PROCEED_SNAPSHOT_STALE
+}
+
+/** 放行面：只有两个 PROCEED* 允许进入「停旧进程 + 重新拉起」。拒绝面一律不得动作。 */
+internal fun safeModeRestartCanProceed(decision: SafeModeRestartDecision): Boolean =
+  decision == SafeModeRestartDecision.PROCEED || decision == SafeModeRestartDecision.PROCEED_SNAPSHOT_STALE
+
+/**
+ * 面向用户的**如实**文案（含被拒时的真因与出口）。
+ *
+ * 放行两条都**不得**宣称已就绪：此刻旧进程已停、新进程未起，是明确的中间态。
+ * 被拒两条必须说清「安全模式的插件改动本次不生效」，不得让用户以为已经生效。
+ */
+internal fun safeModeRestartHint(decision: SafeModeRestartDecision): String = when (decision) {
+  SafeModeRestartDecision.PROCEED ->
+    "正在以安全模式重启运行时…（旧引擎已停，新引擎启动中，请保持应用在前台）"
+  SafeModeRestartDecision.PROCEED_SNAPSHOT_STALE ->
+    "正在以安全模式重启运行时…（运行时快照尚未就绪，本次启动会先按既有规则处理快照，可能较慢；旧引擎已停，新引擎启动中）"
+  SafeModeRestartDecision.REFUSE_LIVE_INCOMPLETE ->
+    "运行时不完整，未停止也未重启引擎：安全模式的插件改动**本次不生效**。请先在错误页按提示重做运行时，再重试。"
+  SafeModeRestartDecision.REFUSE_OWNERSHIP ->
+    "3080 端口未被归属到本应用，未停止也未重启引擎：安全模式的插件改动**本次不生效**。请先在控制台排查端口占用。"
 }
 
 // ── DEVICE-FINDING-4：引擎强制重启后的**有界就绪等待**（纯判据，JVM 可反证）─────────

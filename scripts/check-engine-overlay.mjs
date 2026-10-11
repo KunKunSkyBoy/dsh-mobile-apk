@@ -375,27 +375,64 @@ for (const [path, meta] of want) {
   if (mountFilesRead !== ROW_FILES.length) {
     fails.push('行面文件未全部取到（' + mountFilesRead + '/' + ROW_FILES.length + '）——正向闭包判据会空转')
   }
+  /* 行面来源（0.14.6 实测）：mounted 取自 ROW_FILES 三份 cordis.patch.yml（dsh-base / dsh-web-app / profile web）。
+   * 下一个人若要**离线**复算引用链，注意真实链可能与手推不符：实测 regexpp 的真实链是
+   * `@deepseek-ai/dsh-plugin-manager -> @deepseek-ai/dsh-app-boot -> @eslint-community/regexpp`
+   * （引进来的是 dsh-plugin-manager 这条挂载行，不是 dsh-web-app），以本门禁打印的链为准。
+   *
+   * 0.14.6（otel 设备实锤）：本判据原为**一层**——只断言挂载包自己声明的直接运行时依赖在场。
+   * 一层判据挡不住「本体的传递依赖缺席」：got 本体已登记并在场，got 自己的 12 条 dependencies
+   * 全部不在树里 ⇒ 一层判据恒绿。设备后果：dsh-otel 顶部静态 import got 在
+   * got/dist/source/create.js 处 ERR_MODULE_NOT_FOUND ⇒ dsh-otel 整条 failed to import ⇒
+   * session-telemetry-otel pending(waiting for service: otel) ⇒ engine.log "2 entries did not activate"，
+   * 而本地门禁 412 条断言**全绿**（重构前实测：正向闭包缺口 0 但 PASSED）。
+   * 现改为**传递闭包（BFS）**：从行面出发逐层要求在场，缺口逐条列出**完整引用链**
+   * （行面 -> … -> 缺的包），逼一次显式裁决。引用链是本改造的全部价值：它把「谁把这条依赖引进来的」
+   * 直接写在失败输出里，排障者不必再手推闭包。 */
   const runtimeGaps = new Map()
-  for (const name of mounted) {
-    const meta = byName.get(name)
-    if (meta === undefined) continue // 行面里但树内没有：反向面/装配链另有判据，这里只管依赖
-    for (const dep of meta.runtimeDeps ?? []) {
-      if (byName.has(dep)) continue
-      if (RUNTIME_MISSING_OK.has(dep)) continue
-      if (!runtimeGaps.has(dep)) runtimeGaps.set(dep, [])
-      runtimeGaps.get(dep).push(name)
+  const closureReached = new Set()
+  {
+    const queue = []
+    for (const name of mounted) {
+      if (closureReached.has(name)) continue
+      closureReached.add(name)
+      if (byName.has(name)) queue.push({ name, chain: [name] })
+    }
+    while (queue.length > 0) {
+      const { name, chain } = queue.shift()
+      for (const dep of byName.get(name)?.runtimeDeps ?? []) {
+        const next = chain.concat(dep)
+        if (byName.has(dep)) {
+          if (closureReached.has(dep)) continue
+          closureReached.add(dep)
+          queue.push({ name: dep, chain: next })
+          continue
+        }
+        if (RUNTIME_MISSING_OK.has(dep)) continue
+        if (!runtimeGaps.has(dep)) runtimeGaps.set(dep, [])
+        // 每条链都记下来（同一条缺席依赖可能由多条行面路径引入）；显示面有界，故封顶 4 条。
+        const chains = runtimeGaps.get(dep)
+        if (chains.length < 4) chains.push(next.join(' -> '))
+      }
     }
   }
-  console.log('  正向闭包：行面 ' + mountFilesRead + ' 文件 / 挂载点 ' + mounted.size + ' 个 / 运行时依赖缺口 ' + runtimeGaps.size)
+  console.log('  正向闭包：行面 ' + mountFilesRead + ' 文件 / 挂载点 ' + mounted.size + ' 个'
+    + ' / 传递可达 ' + closureReached.size + ' / 运行时依赖缺口 ' + runtimeGaps.size)
+  // 自证（0.14.6 防判据空转）：传递闭包必须真的**往下走过层**——可达集不大于挂载点就说明
+  // 快照包元数据或行面解析退化了，本判据在空转。空转比判红更危险：它会安静地放过同一形态的下一次。
+  if (closureReached.size <= mounted.size) {
+    fails.push('正向闭包判据疑似空转：传递可达 ' + closureReached.size + ' 不大于挂载点 ' + mounted.size
+      + '——快照包元数据（runtimeDeps）或行面解析已退化，本判据没有真正走传递层')
+  }
   if (runtimeGaps.size > 0) {
-    for (const [dep, who] of [...runtimeGaps.entries()].sort()) {
-      console.log('    ' + dep + '  <- ' + who.slice(0, 4).join(', ') + (who.length > 4 ? ' 等 ' + who.length + ' 个' : ''))
+    for (const [dep, chains] of [...runtimeGaps.entries()].sort()) {
+      console.log('    ' + dep + '  <- ' + chains.slice(0, 3).join('  |  ') + (chains.length > 3 ? ' 等 ' + chains.length + ' 条链' : ''))
     }
-    fails.push('行面（会被挂载的包）的运行时依赖在快照内不可解析 ' + runtimeGaps.size + ' 条（见上方清单）'
-      + '——登记进 engine-overlay.json 的 packages/vendorTop（含传递依赖），'
+    fails.push('行面（会被挂载的包）的**传递**运行时依赖在快照内不可解析 ' + runtimeGaps.size + ' 条（见上方引用链）'
+      + '——登记进 engine-overlay.json 的 packages/vendorTop（含全部传递依赖），'
       + '或在 check-engine-overlay.mjs 的 RUNTIME_MISSING_OK 里显式豁免并给理由。'
       + '历史教训：execa / @deepseek-ai/libreoffice-kit / cosmokit@1.8.3 都是这么漏的，'
-      + '漏掉的后果是设备 boot 阶段硬崩而本地门禁全绿。'
+      + '0.14.6 又添一例（got 本体在场、12 条传递依赖全缺 ⇒ 设备 dsh-otel failed to import 而门禁全绿）。'
       + '（未挂载的实验性 provider 不在本判据内——它们缺依赖不影响 boot，对它们判红是假红。）')
   }
   checked += 0

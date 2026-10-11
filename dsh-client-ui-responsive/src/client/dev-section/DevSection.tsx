@@ -13,6 +13,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { useShellState } from '../mobile/use-shell-state.ts'
 import { describeHttpFailure, noticeDataAttrs, type Notice } from '../user-copy.ts'
 import { RuntimeCacheRow } from './runtime-cache.tsx'
+import { ModelCapabilityRow } from './model-capability.tsx'
+import { ApkUpdateRow } from './apk-update.tsx'
 import type { PropsRenderSlots, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls in the settings.section owner share (erased at build time, types only).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
@@ -344,6 +346,17 @@ export function DevSection({ renderSlot }: DevSectionProps) {
 
       {/* 0.14.1 块 E（详档 §4.3）：运行时缓存清理——白名单制、先给可回收体积再执行、逐项落审计。 */}
       <RuntimeCacheRow />
+
+      {/* 0.14.6 功能 A6：非内置提供商模型能力的手动补齐入口。
+          A7 之后补给只在保存时发生，故用户「早就在用的模型」需要一个显式触发点；
+          这里复用既有开发者选项区，不新开设置分区、不新增独立大按钮。 */}
+      <ModelCapabilityRow />
+
+      {/* 0.14.6（用户指令「更新不应该是只更新快照，应该是下载 apk 然后更新」）：应用自更新入口。
+          此前该状态机与入口只存在于引导页渲染器里，而健康态 showWeb() 把引导页藏起来
+          => 健康状态下没有任何更新入口（能力在、入口无）。壳侧已把状态机提为单一真源，
+          本行与引导页按钮读同一份状态，故两入口不会打架。 */}
+      <ApkUpdateRow />
 
       {/* 0.14.1 批 3（P3-5）：通知设置已从开发者选项**提级**为设置页一级分区「通知」。
           这里只留指路（同功能双实现是审查档 §5 的结构性根因，故不重复渲染同一组开关）。 */}
