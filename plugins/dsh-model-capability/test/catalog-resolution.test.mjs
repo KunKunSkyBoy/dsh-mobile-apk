@@ -14,19 +14,30 @@
 // 本文件用**合成夹具**做语义断言（确定、与出货目录解耦），另在出货目录在场时追加真实目录断言。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { lookupCatalog } from '../lib/catalog-lookup.js'
 
 // 与 t1-poll-cost.test.mjs 同款：lib/catalog-snapshot.json 是构建期产物，净检出（CI）里缺席。
-// 缺席时用最小夹具补上（只当是自己写的才删），使 CI 与本地同形真跑。
+// 缺席时用最小夹具补上，使 CI 与本地同形真跑。
+//
+// **写一次、永不删除**（2026-10-11 竞态实锤）：`node --test test/*.test.mjs` 把**每个文件放进
+// 独立进程并行跑**，而本仓有 4 个文件共用这同一条快照路径。旧实现「谁写的谁删（after/exit 里
+// rmSync）」于是出现：进程 A 跑完删掉文件，进程 B 正要读 -> ENOENT，**同一份代码时绿时红**
+// （实测净检出下 8 次里失败 1 次；4 个写入者时 8 次里失败 5 次）。
+// 不删是安全的，四条依据：① 各写入者内容**完全相同**（同一 FIXTURE），谁先落盘都一样；
+// ② 真快照由 build-snapshot-013.mjs 在构建时**无条件重新生成**，留着的夹具必被覆盖；
+// ③ check-patch-mirror.mjs 第 392 行**显式跳过**该路径，不影响双仓镜像比对；
+// ④ .gitignore:19 `plugins/*/lib/` 已忽略 lib/，它永远不会被提交。
+// 写入用「临时文件 + rename」而非直接 copyFileSync：rename 在同文件系统上是原子的，
+// 读者要么看到完整文件、要么看不到，绝不会读到半截内容。
 const SNAPSHOT = new URL('../lib/catalog-snapshot.json', import.meta.url)
 const FIXTURE = new URL('./fixtures/catalog-snapshot.min.json', import.meta.url)
-let wroteFixture = false
 if (!existsSync(SNAPSHOT)) {
-  copyFileSync(FIXTURE, SNAPSHOT)
-  wroteFixture = true
+  const tmp = new URL(`${SNAPSHOT.pathname}.${process.pid}.tmp`, 'file:')
+  copyFileSync(FIXTURE, tmp)
+  try { renameSync(tmp, SNAPSHOT) } catch { /* 另一进程已抢先落盘（内容相同） */ }
+  finally { try { rmSync(tmp, { force: true }) } catch { /* 已被 rename 移走 */ } }
 }
-process.on('exit', () => { if (wroteFixture) rmSync(SNAPSHOT, { force: true }) })
 
 const catalog = JSON.parse(readFileSync(SNAPSHOT, 'utf8'))
 const CATALOG_KEYS = Object.keys(catalog.models ?? {})

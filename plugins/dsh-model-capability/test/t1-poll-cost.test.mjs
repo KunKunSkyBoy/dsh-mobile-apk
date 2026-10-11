@@ -19,7 +19,7 @@
 //   - 让 readDescriptor 每次重新 describe -> ③ 红。
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync, renameSync, rmSync } from 'node:fs'
 import { apply } from '../lib/index.js'
 
 const SRC = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
@@ -32,19 +32,23 @@ const SRC = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
 // CI 上 T1-⑤/⑥/X1-⑧ 取不到目录数据 → 写回不发生 → 断言判红；本机全绿。
 //
 // 处置：**不用 SKIP**（那会让 CI 永久丢掉 X1 的守卫，而 X1 正是咬过我们一次的 HMR 嵌套回归）。
-// 改为「缺席则用夹具补上、仅当是自己写的才删」，使 CI 与本地**同形真跑**；本地真快照在场时不覆盖。
+// 改为「缺席则用夹具补上」，使 CI 与本地**同形真跑**；本地真快照在场时不覆盖。
+//
+// **写一次、永不删除**（2026-10-11 竞态实锤）：`node --test test/*.test.mjs` 把**每个文件放进独立
+// 进程并行跑**，而本仓有 4 个文件共用这同一条快照路径。旧实现「谁写的谁删（after 里 rmSync）」于是
+// 出现：进程 A 跑完删掉文件，进程 B 正要读 -> ENOENT，**同一份代码时绿时红**（实测净检出下 8 次里
+// 失败 1 次；4 个写入者时 8 次里失败 5 次）。不删是安全的：各写入者内容完全相同（同一 FIXTURE）、
+// 真快照由 build-snapshot-013.mjs 构建时无条件重生成、check-patch-mirror 第 392 行显式跳过该路径、
+// .gitignore:19 已忽略 lib/。写入用「临时文件 + rename」保证读者看不到半截内容。
 const SNAPSHOT = new URL('../lib/catalog-snapshot.json', import.meta.url)
 const FIXTURE = new URL('./fixtures/catalog-snapshot.min.json', import.meta.url)
-let wroteFixture = false
 
 before(() => {
   if (existsSync(SNAPSHOT)) return
-  copyFileSync(FIXTURE, SNAPSHOT)
-  wroteFixture = true
-})
-
-after(() => {
-  if (wroteFixture) rmSync(SNAPSHOT, { force: true })
+  const tmp = new URL(`${SNAPSHOT.pathname}.${process.pid}.tmp`, 'file:')
+  copyFileSync(FIXTURE, tmp)
+  try { renameSync(tmp, SNAPSHOT) } catch { /* 另一进程已抢先落盘（内容相同） */ }
+  finally { try { rmSync(tmp, { force: true }) } catch { /* 已被 rename 移走 */ } }
 })
 
 /** 剥注释：只保留可执行/声明行，避免用文档串当判据（本仓三次踩过的坑）。 */

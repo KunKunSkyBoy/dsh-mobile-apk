@@ -12,7 +12,7 @@
 //   - 「仅改 apiKey / baseURL 而模型集合未变」不得触发任何能力补齐。
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { copyFileSync, existsSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, renameSync, rmSync } from 'node:fs'
 import { readFileSync } from 'node:fs'
 import { apply } from '../lib/index.js'
 
@@ -20,15 +20,26 @@ import { apply } from '../lib/index.js'
 const INDEX_SRC = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
 
 // lib/catalog-snapshot.json 是构建期产物：净检出（CI）里缺席，缺席则用夹具补上。
+//
+// **写一次、永不删除**（2026-10-11 竞态实锤）：`node --test test/*.test.mjs` 把**每个文件放进独立
+// 进程并行跑**，而本仓有 4 个文件共用这同一条快照路径。旧实现「谁写的谁删（after 里 rmSync）」于是
+// 出现：进程 A 跑完删掉文件，进程 B 正要读 -> ENOENT，**同一份代码时绿时红**（实测净检出下 8 次里
+// 失败 1 次；4 个写入者时 8 次里失败 5 次）。不删是安全的：各写入者内容完全相同（同一 FIXTURE）、
+// 真快照由 build-snapshot-013.mjs 构建时无条件重生成、check-patch-mirror 第 392 行显式跳过该路径、
+// .gitignore:19 已忽略 lib/。写入用「临时文件 + rename」保证读者看不到半截内容。
+//
+// 夹具**必须如实声明本测试依赖的内置 provider**，否则断言前提会随环境静默改变（2026-10-11 CI 实锤）：
+// 下面 A5 用例用 'openai' 举证「内置 provider 不补」，而旧夹具只声明 baseten，
+// 于是净检出下 builtInProviders={baseten} -> 'openai' 被误判「非内置」-> 触发补齐 -> 该断言假红。
 const SNAPSHOT = new URL('../lib/catalog-snapshot.json', import.meta.url)
 const FIXTURE = new URL('./fixtures/catalog-snapshot.min.json', import.meta.url)
-let wroteFixture = false
 before(() => {
   if (existsSync(SNAPSHOT)) return
-  copyFileSync(FIXTURE, SNAPSHOT)
-  wroteFixture = true
+  const tmp = new URL(`${SNAPSHOT.pathname}.${process.pid}.tmp`, 'file:')
+  copyFileSync(FIXTURE, tmp)
+  try { renameSync(tmp, SNAPSHOT) } catch { /* 另一进程已抢先落盘（内容相同） */ }
+  finally { try { rmSync(tmp, { force: true }) } catch { /* 已被 rename 移走 */ } }
 })
-after(() => { if (wroteFixture) rmSync(SNAPSHOT, { force: true }) })
 
 const EV = 'settings/document-updated'
 /** 出货目录快照里真实存在的 id（baseten 形态：带 thinkingLevelMap 与 thinkingFormat=openai）。 */
