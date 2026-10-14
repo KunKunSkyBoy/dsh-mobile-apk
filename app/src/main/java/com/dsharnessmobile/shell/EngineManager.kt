@@ -75,6 +75,7 @@ class EngineManager(private val context: Context, private val pickToken: String?
     }
   }
 
+
   /** Read once per manager; missing/invalid metadata is an explicit packaging failure, not freshness. */
   private val bundledSnapshotFingerprint by lazy {
     val raw = try {
@@ -90,6 +91,32 @@ class EngineManager(private val context: Context, private val pickToken: String?
 
   internal fun snapshotFingerprintProblem(): SnapshotFingerprintPolicy.Bundled? =
     bundledSnapshotFingerprint.takeIf { it.failureCode != null }
+
+  /**
+   * 0.14.7 / task-9：**解码之前的**内嵌资产摘要预检。
+   *
+   * 为什么必须有（与 D-1 是互补的两条，不能互相取代）：
+   *  - D-1 记的是「预检通过、解码仍失败」时那条 CorruptedInputException 的全栈（真因在解码器内部）；
+   *  - 本预检记的是「连字节都对不上声明值」——它把真因从解码器内部提到**输入本身**，并给出
+   *    expected/actual/bytes 三项，使下一次真机失败在 boot-fail.log 里自证，
+   *    不必再连设备 pull base.apk 做字节比对。
+   *
+   * 成本纪律：**流式**读 + 固定 64KB 缓冲，既不一次性读进内存（194MB），也不解码（只需一遍顺序 IO）。
+   * 返回 null 表示「预检通过或声明值不可用」——声明值缺失/非法已由 [snapshotFingerprintProblem] 归类，此处不重复判。
+   */
+  private fun bundledAssetDigestProblem(): Pair<String, String>? {
+    val declared = bundledFingerprint().takeIf { it.isNotEmpty() } ?: return null
+    val actual = try {
+      SnapshotBundledAsset.digest(open = { context.assets.open(BUNDLED_SNAPSHOT_ASSET) })
+    } catch (t: Throwable) {
+      // 连资产都打不开：这不是解码器报错，而是资产缺席/不可读，必须与「摘要不一致」分开归类。
+      Log.e(TAG, "bundled snapshot asset could not be read for digest precheck", t)
+      return SnapshotBundledAsset.CODE_UNREADABLE to
+        ("内嵌运行时快照资产无法读取（" + BUNDLED_SNAPSHOT_ASSET + "）：" + t.javaClass.name + ": "
+          + (t.message ?: "无消息") + "。本次解码未开始即被拦下，现有用户数据未改动。")
+    }
+    return SnapshotBundledAsset.verdict(declared, actual)
+  }
 
   private fun bundledFingerprint(): String = bundledSnapshotFingerprint.fingerprint.orEmpty()
 
@@ -213,18 +240,54 @@ class EngineManager(private val context: Context, private val pickToken: String?
           Log.e(TAG, "snapshot refresh aborted: unusable staging residue at " + stage.absolutePath
             + " -> " + discarded.joinToString(", "))
           onStage("上次更新的残留目录无法清理，请清应用数据后重试")
+          // D-1：这条 return false 同样是「只有布尔值」的静默失败支（旧实现只 onStage 一句文案，
+          // 真因 = 哪些条目删不掉、哪些条目改名挪不开，全部只存在于 logcat）。
+          lastRefreshFailure = SnapshotFsException(
+            CODE_STAGE_RESIDUE, emptyList(),
+            "上次更新的残留目录既删不掉也移不开（stage=" + stage.absolutePath + "，未删除项="
+              + discarded.joinToString(", ") + "）；现有用户数据未改动，需清理应用数据后重试。",
+          )
+          lastRefreshFailureCode = CODE_STAGE_RESIDUE
           return false
         }
         Log.w(TAG, "snapshot refresh: residue stage moved aside to " + orphan.name
           + " -> " + discarded.joinToString(", "))
       }
       SnapshotFs.createDirectories(stage)
+      // 0.14.7 / task-9：**摘要预检**必须在解码之前。理由见 [bundledAssetDigestProblem]：
+      // 没有它时，资产字节损坏的唯一线索是解码器内部的 CorruptedInputException（真因在解码器里，
+      // 输入本身对不上声明值这件事反而看不见）；有了它，boot-fail.log 直接给出 expected/actual/bytes。
+      bundledAssetDigestProblem()?.let { (code, detail) ->
+        Log.e(TAG, "snapshot refresh refused before decoding: " + code + " -> " + detail)
+        onStage(detail)
+        lastRefreshFailure = SnapshotFsException(code, emptyList(), detail)
+        lastRefreshFailureCode = code
+        SnapshotFs.deletePath(stage)
+        return false
+      }
       if (!SnapshotRefreshStage.extractAndValidate(
           stage,
           extract = { extractSnapshotTo(it, onProgress) },
           validate = ::stagedRuntimeComplete,
         )) {
         Log.e(TAG, "snapshot refresh: extraction failed or staged runtime incomplete; live runtime untouched")
+        // 【0.14.7 / task-9 D-1】解压/校验以布尔值回报失败时，**真因必须有人写**。
+        // 旧实现只在这里 return false：extractSnapshotTo 的 catch 只写了 Log.e（易失的 logcat），
+        // 异常对象从未挂到 lastRefreshFailure ⇒ 调用方（EngineStartFlow:863-864）只能拿到 null
+        // ⇒ boot-fail.log 落成 error=none(boolean-failure-path)、stack=none，排障者拿不到真因。
+        // 现在由 extractSnapshotTo 负责把异常挂上（它同时覆盖「校验失败」这一支）。
+        if (lastRefreshFailure == null) {
+          val missing = RuntimeTree.missingEntries(
+            root = File(stage, "usr"),
+            profileDir = File(stage, "home/.dsh/profiles/web"),
+          )
+          lastRefreshFailure = SnapshotFsException(
+            SnapshotBundledAsset.CODE_STAGE_INCOMPLETE, emptyList(),
+            "内嵌运行时快照解压完成但 staged 运行时缺件（missing=" + missing.joinToString(", ")
+              + "）；本次未换树，现有用户数据未改动。",
+          )
+          lastRefreshFailureCode = SnapshotBundledAsset.CODE_STAGE_INCOMPLETE
+        }
         return false
       }
 
@@ -773,18 +836,39 @@ class EngineManager(private val context: Context, private val pickToken: String?
   /**
    * Extract the bundled snapshot archive into [stage]. The live tree is never a
    * destination: extraction is only ever performed inside the transaction stage.
+   *
+   * 【0.14.7 / task-9 D-1 + D-2】**真因必须挂到 [lastRefreshFailure]**：旧实现在 catch 里只写
+   * `Log.e`（只进易失的 logcat），随后 `return false` —— 调用方（EngineStartFlow 的失败分支）
+   * 只能拿到布尔值，于是 boot-fail.log 落成 `error=none(boolean-failure-path)`、`stack=none`。
+   * 真机现场那条 `org.tukaani.xz.CorruptedInputException: Compressed data is corrupt` 因此**零落盘**，
+   * 排障只能靠 logcat 反查。现在异常对象与稳定错误码都挂在这里，由既有链路一路写进 boot-fail.log。
+   *
    * @param onProgress bytesDone, bytesTotal.
    * @returns true on success.
    */
   private fun extractSnapshotTo(stage: File, onProgress: (Long, Long) -> Unit): Boolean {
+    // D-2（0.14.7 / task-9）：取 fd.length 用的 AssetFileDescriptor **必须关闭**。
+    // 旧实现 `val fd = context.assets.openFd(...)` 从不 close —— 真机 logcat 里那句
+    // "A resource failed to call close." 就是它。AssetFileDescriptor 持有真实的 ParcelFileDescriptor，
+    // 而这条路径在「每次启动都失败、每次重试」的形态下会被反复走到（真机正是这种形态），
+    // 泄漏是**按启动次数累积**的。用 use{} 保证异常路径同样关闭；长度先取出来再进解压。
+    val assetLength = try {
+      context.assets.openFd(BUNDLED_SNAPSHOT_ASSET).use { it.length }
+    } catch (t: Throwable) {
+      // 取不到长度不是致命：totalBytes 只用于进度显示（0 = 未知）。摘要预检已单独归类「资产不可读」。
+      Log.w(TAG, "could not read bundled snapshot asset length; continuing with unknown total", t)
+      0L
+    }
     return try {
-      val fd = context.assets.openFd("snapshot.tar.xz")
-      SnapshotExtractor.extract(
-        context.assets.open("snapshot.tar.xz"), fd.length, stage, onProgress, runtimeRoot = context.filesDir,
-      )
+      context.assets.open(BUNDLED_SNAPSHOT_ASSET).use { input ->
+        SnapshotExtractor.extract(input, assetLength, stage, onProgress, runtimeRoot = context.filesDir)
+      }
       true
     } catch (t: Throwable) {
       Log.e(TAG, "snapshot extract failed", t)
+      // D-1 的落点：异常 + 归类码。`extract` 抛出的若是解码器异常，类名与栈原样保留在 cause 链上。
+      lastRefreshFailure = t
+      lastRefreshFailureCode = (t as? SnapshotFsException)?.code ?: CODE_EXTRACT_FAILED
       false
     }
   }
@@ -1967,6 +2051,14 @@ class EngineManager(private val context: Context, private val pickToken: String?
     return false
   }
 
+  /** Activity boot polling also waits for another manager's accepted pre-spawn request.
+   * This is separate from process liveness: watchdog/ownership callers must never
+   * treat an in-flight request as evidence that a child exists. */
+  internal fun engineBootMayContinue(): Boolean = observeBootContinuation(
+    startupInProgress = { STARTING.get() },
+    processAlive = { engineProcessAlive() },
+  )
+
   /**
    * Terminate only the tracked child process. We intentionally do not use pkill: a process-name
    * match cannot prove ownership and could kill an unrelated listener. The port must be observed
@@ -2311,6 +2403,18 @@ description: 手机操控纪律：无障碍语义树优先、ref 语义点击/�
     private val transactionStateLock = Any()
     private const val ONLINE_SNAPSHOT_NAME = ".online-snapshot"
 
+    /** 内嵌快照资产文件名（唯一出处）——摘要预检与解压必须指向**同一份**资产。 */
+    private const val BUNDLED_SNAPSHOT_ASSET = "snapshot.tar.xz"
+
+    /**
+     * 解压支的失败码（D-1）：解压本身抛异常时由 [extractSnapshotTo] 记真因与栈；
+     * 本条只用于「解压没抛错、但 staged 运行时缺件」这一支——它此前连异常对象都没有。
+     */
+    private const val CODE_EXTRACT_FAILED = "snapshot-extract-failed"
+
+    /** 上次残留目录既删不掉也移不开（D-1 的另一条静默 return false）。 */
+    private const val CODE_STAGE_RESIDUE = "snapshot-stage-residue"
+
     /** Last real start time (epoch ms); the watchdog cooldown-window baseline. */
     @Volatile
     var lastStartAttemptAt: Long = 0
@@ -2396,3 +2500,11 @@ internal fun mirrorLogBounded(src: File, dst: File, limitBytes: Long = MIRROR_LO
     false
   }
 }
+
+/** Observe startup before liveness so publishing a child then releasing the start
+ * guard cannot create a false DEAD result. A second ordered pass also covers a
+ * new winner that acquired and released the guard during the first process read. */
+internal fun observeBootContinuation(
+  startupInProgress: () -> Boolean,
+  processAlive: () -> Boolean,
+): Boolean = startupInProgress() || processAlive() || startupInProgress() || processAlive()

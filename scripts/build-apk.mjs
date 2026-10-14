@@ -72,6 +72,8 @@ const GATE_SCRIPTS = [
   // 产物（gitignore）——本链（云端自包含）对应小节 SKIP 计数；发布链以 --require 强制齐全。
   'check-contract.mjs',
   'check-snapshot-fingerprint.mjs',
+  // 内嵌快照「真的能解压」门禁（0.14.7 / task-9 D-4）：指纹只自证「声明值与 tar 同批写出」，不解压。
+  'check-snapshot-decode.mjs',
   // Delivery gate: every final APK must verify with v1, v2, and v3 before leaving out/.
   'check-apk-signatures.mjs',
   'check-manifest-hardening.mjs',
@@ -376,6 +378,10 @@ try {
     fingerprintGate: gate('check-snapshot-fingerprint.mjs'),
     log,
   }, (cmd, argv, opts) => spawnSync(cmd, argv, { cwd: ROOT, encoding: 'utf8', stdio: 'inherit', ...opts }))
+  // 内嵌快照「真的能解压」门禁（0.14.7 / task-9 D-4）：必须紧跟 assembleApk —— 那时
+  // assets/snapshot.tar.xz 正是本次被复制进 APK 的字节。判据与本地链同源（同一份脚本）。
+  log('门禁：内嵌快照可解压（设备同源 streaming 解码器全量解压）…')
+  run('node', [gate('check-snapshot-decode.mjs'), '--tar', join(apkDir, 'app', 'src', 'main', 'assets', 'snapshot.tar.xz')])
   run(process.execPath, [gate('check-apk-signatures.mjs'), '--self-test'])
   verifyApks({ signatureGate: gate('check-apk-signatures.mjs'), directories: [OUT], selfTest: false, log },
     (cmd, argv, opts) => spawnSync(cmd, argv, { cwd: ROOT, encoding: 'utf8', stdio: 'inherit', ...opts }))

@@ -139,7 +139,9 @@ for (const patch of PATCH_REGISTRY.patches.filter((p) => p.scope === 'engine' &&
   for (const path of [patch.target, ...(patch.additionalTargets ?? [])]) {
     const marker = String(patch.targetMarkers?.[path] ?? patch.marker ?? '').replace(/（.*$/, '').trim()
     if (!marker && !patch.verifier) throw new Error('engine patch missing verification: ' + patch.id)
-    want.set(path, { kind: 'patch-marker', name: patch.id, version: null, marker,
+    const requiredMarkers = [...(want.get(path)?.requiredMarkers ?? []), ...(path === patch.target ? patch.requiredMarkers ?? [] : [])]
+    if (requiredMarkers.some(marker => typeof marker !== 'string' || !marker.trim())) throw new Error('engine patch invalid requiredMarkers: ' + patch.id)
+    want.set(path, { kind: 'patch-marker', name: patch.id, version: null, marker, requiredMarkers: [...new Set(requiredMarkers)],
       verifier: patch.verifier, discovery: path === patch.target ? patch.targetDiscovery : undefined })
   }
   if (patch.verifier) {
@@ -291,6 +293,9 @@ for (const [path, meta] of want) {
     checked++
   } else if (meta.kind === 'patch-marker') {
     if (!meta.verifier && !content.includes(meta.marker)) fails.push(`[patch-marker] ${meta.name} 标记「${meta.marker}」缺席（补丁未施加或版本漂移）`)
+    for (const marker of meta.requiredMarkers ?? []) {
+      if (!content.includes(marker)) fails.push(`[patch-marker] ${meta.name} 必需标记「${marker}」缺席（快照来自旧补丁集）`)
+    }
     checked++
   } else if (meta.kind === 'vendor' || meta.kind === 'nested' || meta.kind === 'pin') {
     // W8：登记清单内的包顺带核验 license 字段（比对 engine-overlay-licenses.json）

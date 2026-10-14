@@ -207,11 +207,12 @@ export function ApkUpdateRow() {
         <p className="dsh-dev-hint" {...noticeDataAttrs(message)}>{message.text}</p>
       )}
 
+      {/* 精简（0.14.7-B D5）：保留「更新的是什么、怎么校验、何时发起」「权限缺失怎么办」
+          这些用户真要拿来做决定的信息；去掉与本行按钮状态逐字重复的流程复述。 */}
       <p className="dsh-dev-hint">
-        更新的是**应用安装包（APK）**：检查来源为 GitHub 发布页（按本机 ABI 选包），下载走镜像链并做体积与
-        sha256 校验，然后拉起系统安装器。全程**只在你点击时**发起，不做任何自动检查或自动下载。
-        若系统未授予「安装未知应用」权限，会先打开授权页，授权后返回应用即自动续继。
-        安装包落点为 Documents/dshdata/updates（与配置导出同一公共目录）。
+        更新的是应用安装包（APK）：从 GitHub 发布页按本机 ABI 选包，下载走镜像链并校验体积与 sha256，
+        再拉起系统安装器。全程只在你点击时发起，不自动检查或下载；缺「安装未知应用」权限会先打开授权页。
+        安装包落在 Documents/dshdata/updates。
       </p>
     </div>
   )

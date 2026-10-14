@@ -84,8 +84,14 @@ export interface AndroidShellBridge {
    */
   resetShizukuConnection?: () => string
   /**
-   * issue #262「AI root 权限」读面：`{ok, granted, consentValid, consentVersionCode,
-   * currentVersionCode, channelUid, channelRoot, canToggle, honesty, ownership}`。
+   * issue #262「AI root 权限」读面：`{ok, granted, consentValid, consentRevision,
+   * currentRevision, consentVersionCode, currentVersionCode, channelUid, channelRoot,
+   * canToggle, honesty, ownership}`。
+   *
+   * 0.14.7 起 `consentVersionCode` / `currentVersionCode` 的**单位是免责声明内容版本**
+   * （壳侧 `RootGrant.DISCLAIMER_REVISION`），不再是 APK versionCode——同意不随应用升级
+   * 失效（用户实测「root 免责声明每次更新怎么都会掉」）。字段名保留只为桥面对称，新代码请读
+   * `consentRevision` / `currentRevision`；`consentValid` 始终是唯一权威判据。
    *
    * `channelRoot` 是**通道身份**判据（Shizuku 服务端 uid==0），不是「设备是否 root」——
    * 已 root 但 Shizuku 以 ADB（uid 2000）启动时此值为 false；显式授权的 su 是独立替代通道。
@@ -95,10 +101,12 @@ export interface AndroidShellBridge {
    *  拒绝时带 `code`（`not-root-channel` / `consent-required`）与 `guidance`。 */
   setRootGranted?: (on: boolean) => string
   /** issue #262「已阅读」确认写面：取消勾选即撤销同意并**同时关闭开关**；
-   *  同意与 versionCode 绑定，升级后自动失效需重新确认。 */
+   *  同意绑定免责声明内容版本，APK 升级不失效，仅在免责声明内容更新后需重新确认。 */
   setRootConsent?: (on: boolean) => string
   /** issue #262 免责门：打开 APK 内免责声明（`LocalDocs` 通道，页面不传路径）。
-   *  返回 JSON `{ok, reason?}`（reason ∈ unknown-key / missing-asset / no-handler / 异常类名）。 */
+   *  返回 JSON `{ok, reason?}`（reason ∈ unknown-key / missing-asset / no-handler / 异常类名）。
+   *  声明内容修订时，对应的 `RootGrant.DISCLAIMER_REVISION` 必须同步 +1（那才是要求
+   *  用户重新确认的唯一触发器），并同步 `user-copy.ts` / 本页提示文案。 */
   openRootDisclaimer?: () => string
   /** 2026-09-30 主人定例：应用级 root 授权状态（**纯读，永不触发弹窗**）。
    *  `{ok, suExists, suPath, state: 'unknown'|'requesting'|'granted'|'denied'|'timeout'|'no-su',

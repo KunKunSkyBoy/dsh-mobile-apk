@@ -470,6 +470,20 @@ foreach ($abi in @('arm64', 'x86_64')) {
     if (-not [string]::IsNullOrEmpty($Suffix)) { $engineArgs += @("--suffix", $Suffix) }
     node @engineArgs
     if ($LASTEXITCODE -ne 0) { throw "APK build engine failed ($abi)" }
+    # 内嵌快照「真的能解压」门禁（0.14.7 / task-9 D-4）。**必须紧跟 assemble**：
+    #   · 在此之前 assets/snapshot.tar.xz 还是上一次构建的残留（甚至不存在），跑它验的不是本次产物；
+    #   · 在此之后它正是**刚被复制进 APK 的那份字节**（build-apk-engine.mjs 的 copyFileSync，
+    #     且同一次调用内的 check-snapshot-fingerprint.mjs --require 已断言 它 == 声明 sha256）。
+    # 判据 = 用**与设备同一套解码器**（org.tukaani:xz + commons-compress 的 streaming 解压）
+    # 完整解压一遍：无异常 + 条目数>0 + 实读字节数 == 条目声明 size 之和。
+    # 为什么此前没有这条防线：check-snapshot-fingerprint 只做「sha256(tar) == 自己刚写的声明值」的自证，
+    # check-snapshot-asset.ps1 只比对 APK 内嵌与传入的 xz —— **两条都不解压**，于是「摘要自洽但解不开」的
+    # 资产可以一路进包，直到用户真机上以 CorruptedInputException 的形式爆出（真机 logcat 实证）。
+    # 反证（实测）：复制一份翻转 1 字节 → 本门禁判红 exit 1（CorruptedInputException）。
+    # 成本：单 ABI 全量流式解码实测约 38s（与整链相比可忽略），故**默认必跑**，不设「永远跳过」的开关。
+    Write-Host "== 内嵌快照可解压门禁（$abi）=="
+    node (Join-Path $Root "scripts\check-snapshot-decode.mjs") --tar (Join-Path $apkDir "app\src\main\assets\snapshot.tar.xz") 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "内嵌快照无法用设备同源解码器完整解压（坏资产会被打进去）"; continue }
     $producedAbis += $abi
 }
 

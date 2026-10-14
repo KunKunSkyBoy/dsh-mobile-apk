@@ -122,12 +122,12 @@ export function GeneralSettings(_props: GeneralSettingsProps) {
         <input type="checkbox" checked={leftSwipe} onChange={(e) => toggleSidebarSwipe('left', e.target.checked)} />
         <span>左侧栏滑动</span>
       </label>
-      <p className="dsh-dev-hint">手机内容区右滑打开导航、左滑返回会话；屏幕外侧窄边保留给系统手势。</p>
       <label className="dsh-dev-row dsh-dev-switch" data-dsh-sidebar-swipe="right">
         <input type="checkbox" checked={rightSwipe} onChange={(e) => toggleSidebarSwipe('right', e.target.checked)} />
         <span>右侧栏滑动</span>
       </label>
-      <p className="dsh-dev-hint">手机内容区左滑展开右侧栏、右滑收起；屏幕外侧窄边保留给系统手势。</p>
+      {/* 两侧栏各一行说明会把「屏幕外侧窄边保留给系统手势」逐字重复两遍；合成一行说清同一件事。 */}
+      <p className="dsh-dev-hint">手机内容区左右滑动开合两侧栏；屏幕外侧窄边保留给系统手势。</p>
       {notice !== null && <p className="dsh-dev-warn">{notice}</p>}
     </div>
   )

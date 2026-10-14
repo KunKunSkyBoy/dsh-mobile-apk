@@ -88,9 +88,9 @@ exportConfig返回实际path与可能含provider密钥的共享目录警告hint�
 
 | 方向 | 方法 | 位置 | 说明 |
 |---|---|---|---|
-| 页面 → 壳 | `rootGrantState()` | AndroidBridge → RootGrant.state | `granted` 是有效授权（raw switch 且当前版本同意）；`channelRoot` 与显式授权的 `rootGranted` 是替代 root 路径；`ownership={running,overdue,startedAt,completedAt,elapsedMs,operation,result?,lease?}` 回读共享维护。未知通道/状态不猜权限。 |
-| 页面 → 壳 | `setRootGranted(on)` | AndroidBridge → RootGrant.setGranted | root Shizuku 或显式 su 授权在场，且当前版本同意有效才允许开启；关闭永远允许。重新同意不自动复活升级前开关。返回真实写后状态与拒绝码；应用 root 检测是独立显式动作。 |
-| 页面 → 壳 | `setRootConsent(on)` | AndroidBridge → `RootGrant.setConsent` | 「已阅读」确认写面。勾选 = 同意并**与 versionCode 绑定**（升级后自动失效需重新确认）；**取消勾选即撤销同意并同时关闭开关**（issue 用户指定语义，不留矛盾态） |
+| 页面 → 壳 | `rootGrantState()` | AndroidBridge → RootGrant.state | `granted` 是有效授权（raw switch 且同意覆盖当前免责声明内容版本 `RootGrant.DISCLAIMER_REVISION`，**不是** APK versionCode）；`channelRoot` 与显式授权的 `rootGranted` 是替代 root 路径；`ownership={running,overdue,startedAt,completedAt,elapsedMs,operation,result?,lease?}` 回读共享维护。未知通道/状态不猜权限。 |
+| 页面 → 壳 | `setRootGranted(on)` | AndroidBridge → RootGrant.setGranted | root Shizuku 或显式 su 授权在场，且同意覆盖当前免责声明内容版本才允许开启；关闭永远允许。重新同意不自动复活未生效的旧开关。返回真实写后状态与拒绝码；应用 root 检测是独立显式动作。 |
+| 页面 → 壳 | `setRootConsent(on)` | AndroidBridge → `RootGrant.setConsent` | 「已阅读」确认写面。勾选 = 同意并**绑定免责声明内容版本**（`DISCLAIMER_REVISION`；0.14.7 起 APK 升级不再失效——用户实测「root 免责声明每次更新怎么都会掉」的修复，只有声明内容修订才需重新确认；旧键 `consentVersionCode` 只读迁移）；**取消勾选即撤销同意并同时关闭开关**（issue 用户指定语义，不留矛盾态） |
 | 页面 → 壳 | `openRootDisclaimer()` | AndroidBridge → MainActivity `onOpenRootDisclaimer` → `LocalDocs.open` | 免责声明文档通道：APK 内 assets（`docs/root-disclaimer.html`，离线/随版本/不可远端替换）。**不复用 [ExternalLinks]**（其 classify 只允许 https），新开同形本地通道：页面只传 key（固定 `root-disclaimer`），登记表在壳侧 `LocalDocs.kt`。应用内 AlertDialog+WebView 渲染 |
 | 同上（承重墙：策略门） | — | `ShizukuTransport.rootGateRefusal` + `readyService`/`runController` 入口 | 通道 uid==0 且未授权 ⇒ 特权执行面（runShell/pullFile/pushFile/removeRemote/runController）**整体 fail-closed**（code `root-grant-required`）。不做按 op 分类的假隔离（issue 已确证 uid 0 下 shExec 任意 shell，白名单挡不住引号逃逸） |
 | 同上（页面消费） | — | `dsh-client-ui-responsive` 手机控制 Shizuku 区块下方 | 开关 + 「已阅读」复选（带蓝色超链接开免责声明）；非 root 通道：开关置灰 + **红字「无法在未 root 的设备上赋予该权限」**（用户指定文案，逐字） |

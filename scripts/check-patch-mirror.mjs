@@ -303,6 +303,10 @@ if (peer) {
     'scripts/check-protocol-v2.mjs',
     'scripts/check-runtime-assets.mjs',
     'scripts/check-snapshot-fingerprint.mjs',
+    // 0.14.7 / task-9 D-4：内嵌快照「真的能解压」门禁。它是两条构建链与 apk 仓 CI 的**同一执行面**
+    // （本地链 per-ABI 段、云端链 assemble 之后、apk CI 在 gradle 之后各调一次），单边演进即
+    // 「一侧按旧判据/对端缺文件」——与 ST-17 同型，必须逐字节同源。
+    'scripts/check-snapshot-decode.mjs',
     'scripts/check-tool-output-schema.mjs',
     'scripts/check-control-ops.mjs',
     'scripts/check-release-gates.mjs',

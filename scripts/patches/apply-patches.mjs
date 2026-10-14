@@ -23,7 +23,8 @@ import { fileURLToPath } from 'node:url'
 import { ENV_MARKER as PTC_ENV_MARKER, LAUNCH_MARKER as PTC_LAUNCH_MARKER, assertChildClearing, patchEnvironment, patchRuntimeIndex, planPatch } from './ptc-android-native-A1.mjs'
 import { PI_STREAMING_FILES, planPiStreaming } from './pi-upstream-streaming-020.mjs'
 import { MIMO_PI_FILE, planMimoThinking } from './mimo-thinking-toggle-056.mjs'
-import { CLIENT_SCAN_MARKER, TYPERT_SCAN_MARKER, planClientRegistryScan, planTypertRegistryScan } from './data/registry-scan-c4.mjs'
+import { CLIENT_SCAN_MARKER, GATEWAY_CLIENT_MARKER, TYPERT_SCAN_MARKER, planClientRegistryScan, planTypertRegistryScan } from './data/registry-scan-c4.mjs'
+import { CLIENT_INDEX_LOADER_BARRIER_MARKER, planClientIndexLoaderBarrier } from './data/client-index-loader-barrier.mjs'
 import { resolveEnginePatchFile } from './resolve-engine-patch-target.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -2219,8 +2220,14 @@ const IMPLS = {
   'client-registry-scan-C4': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-client-modules/lib/index.js',
     scope: 'engine',
-    check: (s) => s.includes(CLIENT_SCAN_MARKER) && s.includes('batchEntries().get(entryName)') && s.includes('located.manifest ??'),
+    check: (s) => s.includes(CLIENT_SCAN_MARKER) && s.includes(GATEWAY_CLIENT_MARKER) && s.includes('batchEntries().get(entryName)') && s.includes('located.manifest ??'),
     apply: planClientRegistryScan,
+  },
+  'client-index-loader-barrier-G2': {
+    file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/lib/index.js',
+    scope: 'engine',
+    check: (s) => s.includes(CLIENT_INDEX_LOADER_BARRIER_MARKER),
+    apply: planClientIndexLoaderBarrier,
   },
   'typert-registry-scan-C4': {
     file: 'usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-typert-loader/lib/index.js',

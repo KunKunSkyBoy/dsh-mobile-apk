@@ -499,7 +499,8 @@ class AndroidBridge(
 
   /**
    * issue #262：「已阅读」免责确认写面。取消勾选即撤销同意并**同时关闭开关**
-   * （不留矛盾态）；同意与 versionCode 绑定，升级后自动失效需重新确认。
+   * （不留矛盾态）；同意绑定免责声明**内容**版本（[RootGrant.DISCLAIMER_REVISION]），
+   * **不随 APK 升级失效**（0.14.7 修复：此前绑 versionCode，每次升级都掉）。
    */
   @JavascriptInterface
   fun setRootConsent(on: Boolean): String {
