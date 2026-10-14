@@ -199,13 +199,11 @@ jobs:
       # 步骤（结果目录已就位）、**不传 --allow-missing**：结果缺席即判红，逐类基线只许升。
       - name: Kotlin 单测数量反回归（逐类基线 + 无缺席 + 结果新鲜）
         run: node scripts/check-kotlin-test-count.mjs
-      # 内嵌快照可解压门禁（0.14.7 / task-9 D-4）：放在**上一行的 gradle 之后**——
-      # gradle 解析依赖会把 org.tukaani:xz / commons-compress / commons-io / commons-lang3 拉进模块缓存，
-      # 本门禁才能用与设备**同版本**的解码器真跑（否则只有运行期才可能发现资产解不开）。
-      # 判据 = 完整流式解压内嵌 assets/snapshot.tar.xz：无异常 + 条目数>0 + 实读字节数 == 条目声明 size 之和。
-      # 反证（本地实测）：翻转 1 字节 → CorruptedInputException，本门禁 exit 1。
-      - name: 内嵌快照可解压门禁（设备同源解码器全量解压）
-        run: node scripts/check-snapshot-decode.mjs --require
+      # 快照解码器运行时反证：CI 净检出没有构建好的 snapshot.tar.xz，故用合成小归档。
+      # 自测调用生产同源 Java streaming probe，校验正常解码、截断/翻转必失败；另独立运行 SHA-256 指纹门禁正反例。
+      # 这只证明门禁具备判别力，不代表最终 APK 的快照已通过解码；正式资产仍由 build-apk.mjs 在组装后以 --require 检验。
+      - name: 快照解码器反证自测（合成归档）
+        run: node scripts/check-snapshot-decode.mjs --self-test-runtime
       # 测试报告留档：失败时可直接下载 HTML 报告（否则只有日志尾部行）。
       - name: 上传单测报告（失败时）
         if: failure()

@@ -381,7 +381,7 @@ try {
   // 内嵌快照「真的能解压」门禁（0.14.7 / task-9 D-4）：必须紧跟 assembleApk —— 那时
   // assets/snapshot.tar.xz 正是本次被复制进 APK 的字节。判据与本地链同源（同一份脚本）。
   log('门禁：内嵌快照可解压（设备同源 streaming 解码器全量解压）…')
-  run('node', [gate('check-snapshot-decode.mjs'), '--tar', join(apkDir, 'app', 'src', 'main', 'assets', 'snapshot.tar.xz')])
+  run('node', [gate('check-snapshot-decode.mjs'), '--tar', join(apkDir, 'app', 'src', 'main', 'assets', 'snapshot.tar.xz'), '--require'])
   run(process.execPath, [gate('check-apk-signatures.mjs'), '--self-test'])
   verifyApks({ signatureGate: gate('check-apk-signatures.mjs'), directories: [OUT], selfTest: false, log },
     (cmd, argv, opts) => spawnSync(cmd, argv, { cwd: ROOT, encoding: 'utf8', stdio: 'inherit', ...opts }))

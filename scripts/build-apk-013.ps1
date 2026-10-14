@@ -482,7 +482,7 @@ foreach ($abi in @('arm64', 'x86_64')) {
     # 反证（实测）：复制一份翻转 1 字节 → 本门禁判红 exit 1（CorruptedInputException）。
     # 成本：单 ABI 全量流式解码实测约 38s（与整链相比可忽略），故**默认必跑**，不设「永远跳过」的开关。
     Write-Host "== 内嵌快照可解压门禁（$abi）=="
-    node (Join-Path $Root "scripts\check-snapshot-decode.mjs") --tar (Join-Path $apkDir "app\src\main\assets\snapshot.tar.xz") 2>&1 | Out-Host
+    node (Join-Path $Root "scripts\check-snapshot-decode.mjs") --tar (Join-Path $apkDir "app\src\main\assets\snapshot.tar.xz") --require 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) { Deny-Abi $abi "内嵌快照无法用设备同源解码器完整解压（坏资产会被打进去）"; continue }
     $producedAbis += $abi
 }

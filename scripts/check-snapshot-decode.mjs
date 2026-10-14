@@ -22,7 +22,8 @@
 //   node scripts/check-snapshot-decode.mjs                 # 解压 <apk树>/app/src/main/assets/snapshot.tar.xz
 //   node scripts/check-snapshot-decode.mjs --tar <xz>      # 指定文件（反证/受控输入用）
 //   node scripts/check-snapshot-decode.mjs --require       # 严格档：tar 或解码器不齐即判红（不得 SKIP）
-//   node scripts/check-snapshot-decode.mjs --self-test     # 离线判别力自证（不需要 jar/快照）
+//   node scripts/check-snapshot-decode.mjs --self-test     # 纯判据离线自检，不需要 Java/Gradle 缓存
+//   node scripts/check-snapshot-decode.mjs --self-test-runtime # 合成小归档的真实解码/损坏/指纹反证
 //   node scripts/check-snapshot-decode.mjs --root <树>     # 非标准布局
 // 退出码：0 = 通过（或明确计数并打印的 SKIP）；1 = 解压失败/判据不满足；2 = 前置不满足（用法/树定位）。
 //
@@ -32,7 +33,8 @@
 //   DSH_COMPRESS_JAR    commons-compress 的 jar
 //   DSH_IO_JAR          commons-io 的 jar
 //   DSH_LANG3_JAR       commons-lang3 的 jar
-import { existsSync, readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
@@ -44,6 +46,7 @@ const argv = process.argv.slice(2)
 const argOf = (n, d) => { const i = argv.indexOf('--' + n); return i >= 0 ? (argv[i + 1] ?? d) : d }
 const REQUIRE = argv.includes('--require') || process.env.DSH_REQUIRE_SNAPSHOT_DECODE === '1'
 const SELF_TEST = argv.includes('--self-test')
+const SELF_TEST_RUNTIME = argv.includes('--self-test-runtime')
 const OVERRIDE_ROOT = argOf('root', process.env.DSH_APK_ROOT)
 const EXPLICIT_TAR = argOf('tar', null)
 
@@ -102,6 +105,28 @@ const PROBE_SOURCE = [
   '      }',
   '    }',
   '    System.out.println("XZ_DECODE_OK entries=" + entries + " bytes=" + total + " declared=" + declared);',
+  '  }',
+  '}',
+].join('\n')
+
+/** 生成小型有效 fixture；解码仍由上面的设备同源 probe 执行。 */
+const FIXTURE_SOURCE = [
+  'import java.io.*;',
+  'import java.nio.charset.StandardCharsets;',
+  'import org.apache.commons.compress.archivers.tar.*;',
+  'import org.apache.commons.compress.compressors.xz.XZCompressorOutputStream;',
+  '',
+  'public class SnapshotDecodeFixture {',
+  '  public static void main(String[] args) throws Exception {',
+  '    byte[] data = "snapshot decoder self-test\\n".repeat(1024).getBytes(StandardCharsets.UTF_8);',
+  '    try (OutputStream file = new FileOutputStream(args[0]);',
+  '         TarArchiveOutputStream tar = new TarArchiveOutputStream(new XZCompressorOutputStream(file))) {',
+  '      TarArchiveEntry entry = new TarArchiveEntry("self-test.txt");',
+  '      entry.setSize(data.length);',
+  '      tar.putArchiveEntry(entry);',
+  '      tar.write(data);',
+  '      tar.closeArchiveEntry();',
+  '    }',
   '  }',
   '}',
 ].join('\n')
@@ -185,22 +210,82 @@ function declaredVersions() {
   return { xz: pick('org.tukaani:xz'), compress: pick('org.apache.commons:commons-compress') }
 }
 
-function runProbe(java, classpath, tar) {
+function runJavaSource(java, classpath, filename, source, args) {
   const work = mkdtempSync(join(tmpdir(), 'snapshot-decode-'))
   try {
     // JDK 11+ 的单文件源码启动：不需要 javac，也不在此处留构建产物。
-    writeFileSync(join(work, 'SnapshotDecodeProbe.java'), PROBE_SOURCE)
-    return spawnSync(java, ['-Xmx256m', '--class-path', classpath, join(work, 'SnapshotDecodeProbe.java'), tar],
+    const sourcePath = join(work, filename)
+    writeFileSync(sourcePath, source)
+    return spawnSync(java, ['-Xmx256m', '--class-path', classpath, sourcePath, ...args],
       { encoding: 'utf8', timeout: 20 * 60 * 1000, maxBuffer: 8 * 1024 * 1024 })
   } finally {
     rmSync(work, { recursive: true, force: true })
   }
 }
 
-// ── --self-test：离线判别力自证（不需要 jar、不需要快照）────────────────────────
-if (SELF_TEST) {
+function runProbe(java, classpath, tar) {
+  return runJavaSource(java, classpath, 'SnapshotDecodeProbe.java', PROBE_SOURCE, [tar])
+}
+
+// ── 自测：纯判据离线测试；--self-test-runtime 另加真实 Java 解码器/指纹反证 ─────
+if (SELF_TEST || SELF_TEST_RUNTIME) {
   const cases = []
   const check = (label, ok) => { cases.push({ label, ok }); console.log((ok ? 'PASS  ' : 'FAIL  ') + label) }
+  if (SELF_TEST_RUNTIME) {
+    const java = resolveJava()
+    const decoder = resolveDecoder()
+    if (!java) fail('解码器运行时自测需要 Java；不接受纯模拟 PASS')
+    if (decoder.missing.length > 0) fail('解码器运行时自测缺少 Gradle 缓存依赖：' + decoder.missing.join(', '))
+    const classpath = decoder.jars.join(process.platform === 'win32' ? ';' : ':')
+    const actualVersions = decoder.jars.map((p) => p.split(/[\\/]/).slice(-1)[0]).join(', ')
+    const declared = declaredVersions()
+    if (declared?.xz && !actualVersions.includes('xz-' + declared.xz + '.jar')) fail('自测 xz jar 与设备版本不一致：声明 ' + declared.xz + '；实际 ' + actualVersions)
+    if (declared?.compress && !actualVersions.includes('commons-compress-' + declared.compress + '.jar')) fail('自测 commons-compress jar 与设备版本不一致：声明 ' + declared.compress + '；实际 ' + actualVersions)
+
+    const work = mkdtempSync(join(tmpdir(), 'snapshot-decode-self-test-'))
+    try {
+      const validTar = join(work, 'valid.tar.xz')
+      const fixture = runJavaSource(java, classpath, 'SnapshotDecodeFixture.java', FIXTURE_SOURCE, [validTar])
+      if (fixture.error || fixture.status !== 0 || !existsSync(validTar)) {
+        fail('无法生成自测用 tar.xz：' + ((fixture.stderr ?? '') + (fixture.stdout ?? '')).trim())
+      }
+      const valid = decideDecode(runProbe(java, classpath, validTar))
+      check('正向：设备同源 Java 解码器完整解开合成归档', valid.ok && valid.detail.includes('bytes='))
+
+      const validBytes = readFileSync(validTar)
+      const truncatedTar = join(work, 'truncated.tar.xz')
+      writeFileSync(truncatedTar, validBytes.subarray(0, validBytes.length - 1))
+      const truncated = decideDecode(runProbe(java, classpath, truncatedTar))
+      check('反向：实际解码器拒绝截断的 XZ 尾部', !truncated.ok)
+
+      const flippedTar = join(work, 'byte-flipped.tar.xz')
+      const flippedBytes = Buffer.from(validBytes)
+      const footerCrcOffset = flippedBytes.length - 12
+      flippedBytes[footerCrcOffset] ^= 0x01
+      writeFileSync(flippedTar, flippedBytes)
+      const flipped = decideDecode(runProbe(java, classpath, flippedTar))
+      check('反向：实际解码器拒绝校验字节被翻转的 XZ 尾部', !flipped.ok)
+
+      const fingerprintRoot = join(work, 'fingerprint-root')
+      const assets = join(fingerprintRoot, 'app', 'src', 'main', 'assets')
+      mkdirSync(assets, { recursive: true })
+      const fingerprintTar = join(assets, 'snapshot.tar.xz')
+      const fingerprintFile = join(assets, 'snapshot.sha256')
+      writeFileSync(fingerprintTar, validBytes)
+      const actualHash = createHash('sha256').update(validBytes).digest('hex')
+      writeFileSync(fingerprintFile, actualHash + '\n')
+      const fingerprintGate = join(ROOT, 'scripts', 'check-snapshot-fingerprint.mjs')
+      const matchingHash = spawnSync(process.execPath, [fingerprintGate, '--require', '--root', fingerprintRoot], { encoding: 'utf8' })
+      check('正向：实际指纹门禁接受匹配的 SHA-256', matchingHash.status === 0 && matchingHash.stdout.includes('SNAPSHOT-FINGERPRINT CHECK PASSED'))
+      writeFileSync(fingerprintFile, '0'.repeat(64) + '\n')
+      const wrongHash = spawnSync(process.execPath, [fingerprintGate, '--require', '--root', fingerprintRoot], { encoding: 'utf8' })
+      check('反向：实际指纹门禁拒绝错误 SHA-256', wrongHash.status === 1 && (wrongHash.stderr + wrongHash.stdout).includes('指纹与快照不一致'))
+    } finally {
+      rmSync(work, { recursive: true, force: true })
+    }
+  }
+
+  // 纯判据反证仍保留，覆盖探针异常、空归档与实读/声明不一致分支。
   check('正向：解码 OK 行 -> 通过', decideDecode({ status: 0, stdout: 'XZ_DECODE_OK entries=49521 bytes=710586232 declared=710586232' }).ok)
   const corrupt = decideDecode({ status: 1, stderr: 'Exception in thread "main" org.tukaani.xz.CorruptedInputException: Compressed data is corrupt\n\tat org.tukaani.xz.lz.LZDecoder.repeat(LZDecoder.java:83)' })
   check('反向：CorruptedInputException -> 判红且点名异常类', !corrupt.ok && corrupt.why.includes('CorruptedInputException'))
@@ -210,7 +295,7 @@ if (SELF_TEST) {
   check('反向：无判据行（探针没跑）-> 判红', !decideDecode({ status: 0, stdout: 'noise' }).ok)
   check('反向：java 无法启动 -> 判红', !decideDecode({ error: new Error('spawn java ENOENT') }).ok)
   const bad = cases.filter((c) => !c.ok)
-  console.log('SNAPSHOT-DECODE SELF-TEST ' + (bad.length === 0 ? 'PASSED' : 'FAILED') + '（' + cases.length + ' 项）')
+  console.log('SNAPSHOT-DECODE ' + (SELF_TEST_RUNTIME ? 'RUNTIME ' : '') + 'SELF-TEST ' + (bad.length === 0 ? 'PASSED' : 'FAILED') + '（' + cases.length + ' 项）')
   process.exit(bad.length === 0 ? 0 : 1)
 }
 
