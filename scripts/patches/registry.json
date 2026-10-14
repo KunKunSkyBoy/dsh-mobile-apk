@@ -174,7 +174,16 @@
       "scope": "engine",
       "summary": "每个同步 flush 按名称单次索引 Loader 条目，错误回调后失效；nearestPackage 已解析的 manifest 在 resolveMeta 内复用。保留同步构造错误、启动 settle 顺序及运行期/HMR即时语义",
       "provenance": "2026-10-06 MuMu 0.14.5 受控细分：client 构造 flush 193 次 Loader 遍历、38021 行；typert 初始 flush 193 次 qualifies、24181 行。独立CPU样本证实反复遍历热点；C4总体预算仍须无诊断冷启动复测，不以局部耗时改善认绿。",
-      "marker": "dsh-mobile registry scan C4"
+      "marker": "dsh-mobile registry scan C4",
+      "requiredMarkers": ["dsh-mobile gateway client source G1"]
+    },
+    {
+      "id": "client-index-loader-barrier-G2",
+      "target": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/lib/index.js",
+      "scope": "engine",
+      "summary": "首页 HTML 取 client graph 前等待宿主 Loader settle；clientModules 已注册的 deferred startup flush 会先执行，静态资源不经过等待",
+      "provenance": "SN-1-16 MuMu 第 4 轮冷启失败：同一进程初始 __DSH_BOOT__ 59 项、首次 GET / 后稳定 69 项；首页曾在 P1 deferred startup flush 前调用 webServer.renderIndex，图快照遗漏 10 个后续插件并让 50 个 client entry pending。入库证据：scripts/patches/tests/fixtures/dsh-host-frontend-static-SN16/evidence/graph.json；SN16 实际运行时源码字节与包身份 hash 见同目录 capture.json、package.json 与 fixture manifest",
+      "marker": "dsh-mobile client index Loader barrier (G2)"
     },
     {
       "id": "typert-registry-scan-C4",

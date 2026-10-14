@@ -276,3 +276,12 @@ manifest 导入完成后继续按 live Loader 判定。client 的 `nearestPackag
 C4 monitor、TOTAL 同步返回时采样、100ms 预算和至少10个样本的判据均保持原样；局部优化和 CPU
 profile 不能代替无诊断的预算结果。回归为 `client-registry-scan-c4.test.mjs`、
 `typert-registry-scan-c4.test.mjs` 与同时施加 client 扫描补丁的 `combo-probe-p1.test.mjs`。
+
+## 2026-10-12 客户端 gateway 供给时序适配
+
+`client-registry-scan-C4` 增补 G1：未禁用的既有 gateway / typert-registry / client-connection 三个 Loader 行即提供其 browser bundle，
+不再把 host fiber 的存在作为 browser 模块供给前提；其它包继续遵守 fiber 门禁。G1 有独立 marker，runner 的 C4 check 同时核对它，旧 C4 已施加树可以增量补齐且幂等。
+base bundle 已有唯一 `typert-gateway`，web-app 继承它，不能再 insert 一个同包 host 服务。四个 controllers 均保留。
+`gateway-client-source-g1.test.mjs` 使用本代真实 Registry 产物，构造 gateway 及其两个 inject 依赖 host 均未就绪、controller 已就绪的图，
+取回并执行 combo 注册/factory：旧图同步 require 缺件，新图排序供给优先且四个 controller 成功；另验证 disabled、运行期恢复、其它 pending 包不被放宽。
+这是已知缺模块机制的反证修复；具体真机偶发哪条 host 激活分支缺席仍未获逐帧证明，最终 APK 冷启动/升级验收另记。

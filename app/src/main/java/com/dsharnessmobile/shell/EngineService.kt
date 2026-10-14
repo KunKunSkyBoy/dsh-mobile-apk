@@ -40,6 +40,10 @@ class EngineService : Service() {
 
   override fun onCreate() {
     super.onCreate()
+    // Android's foreground-service deadline starts at startForegroundService().
+    // Promote before preferences, manager construction or other initialization;
+    // slow disk/class loading must not spend that deadline before notification.
+    startForeground(NOTIFICATION_ID, buildNotification())
     // review C9：userShutdown 是持久状态的进程内镜像——新进程必须先恢复磁盘上的真值，
     // 否则开机/系统重启后（START_STICKY 重投递或 BootReceiver 拉起）「用户已手动关停」被遗忘。
     userShutdown = isUserShutdownPersisted(this)
@@ -47,7 +51,6 @@ class EngineService : Service() {
     engineManager = EngineManager(this, EngineManager.ensurePickToken())
     serviceEpoch.set(ServiceEpoch())
     instance = this
-    startForeground(NOTIFICATION_ID, buildNotification())
     // 0.14.0-preview §6.2/§6.3：通知信道消费点 + 通知应答流（两者都是进程级幂等单例）。
     // 落在这里而不是 OverlayService：通知必须**独立于悬浮球开关**生存（§6.0 风险 2）。
     NotifyStore.start(this)

@@ -286,9 +286,9 @@ export function DevSection({ renderSlot }: DevSectionProps) {
 
   return (
     <div data-plugin="dev-section" onKeyDown={onKeyDown}>
-      <p className="dsh-dev-note">
-        DeepCode 开发者选项：控制台为运行时内嵌命令行；日志默认关闭。
-      </p>
+      {/* 分区名已由设置中心的二级页标题条承担（竖屏 settings-nav；横屏上游 nav 行），
+          这里不再重复一遍「开发者选项」，只留这一页真正独有的一句说明。 */}
+      <p className="dsh-dev-note">控制台是运行时内嵌命令行；日志默认关闭。</p>
 
       {/* 0.14.0：屏幕/Shizuku/虚拟屏/浮窗/无障碍/强制销毁已迁到独立「手机控制」设置页。 */}
 
@@ -327,10 +327,8 @@ export function DevSection({ renderSlot }: DevSectionProps) {
         />
         <span>悬浮球（任意界面可见的任务面板入口）</span>
       </label>
-      <p className="dsh-dev-hint">
-        屏幕上的圆球：点开可看实时工具调用、可一键停止。与「手机控制」页的「虚拟屏浮窗」
-        （退后台显示虚拟屏画面）是两个不同的东西。
-      </p>
+      {/* P5-6 只要求「点名的两处不是同一个东西」，不再复述另一页的完整语义（那由该页自己说）。 */}
+      <p className="dsh-dev-hint">点开可看实时工具调用、可一键停止；与「手机控制」页的「虚拟屏浮窗」不是同一个东西。</p>
       {overlayMsg !== null && <p className="dsh-dev-hint">{overlayMsg}</p>}
 
       {/* 0.13.1 W4：配置导入/导出（安全手改通道；引擎读私有目录，改共享目录副本无效） */}
@@ -339,9 +337,9 @@ export function DevSection({ renderSlot }: DevSectionProps) {
         <button type="button" className="dsh-dev-btn" onClick={importConfig}>导入配置</button>
       </div>
       {configMsg !== null && <p className="dsh-dev-hint">{configMsg}</p>}
+      {/* 数据安全说明必须保留（配置不含密钥）；路径保留（用户要拿它去改）。 */}
       <p className="dsh-dev-hint">
-        导出位置 Documents/dshdata/exports/config/settings.yaml；用文件管理器修改后点「导入配置」即可生效。
-        配置不含 API 密钥（密钥在应用私有目录，不随导出泄漏）。
+        导出到 Documents/dshdata/exports/config/settings.yaml，改完点「导入配置」生效。导出不含 API 密钥。
       </p>
 
       {/* 0.14.1 块 E（详档 §4.3）：运行时缓存清理——白名单制、先给可回收体积再执行、逐项落审计。 */}

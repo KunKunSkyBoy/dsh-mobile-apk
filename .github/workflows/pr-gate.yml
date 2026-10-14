@@ -199,6 +199,11 @@ jobs:
       # 步骤（结果目录已就位）、**不传 --allow-missing**：结果缺席即判红，逐类基线只许升。
       - name: Kotlin 单测数量反回归（逐类基线 + 无缺席 + 结果新鲜）
         run: node scripts/check-kotlin-test-count.mjs
+      # 快照解码器运行时反证：CI 净检出没有构建好的 snapshot.tar.xz，故用合成小归档。
+      # 自测调用生产同源 Java streaming probe，校验正常解码、截断/翻转必失败；另独立运行 SHA-256 指纹门禁正反例。
+      # 这只证明门禁具备判别力，不代表最终 APK 的快照已通过解码；正式资产仍由 build-apk.mjs 在组装后以 --require 检验。
+      - name: 快照解码器反证自测（合成归档）
+        run: node scripts/check-snapshot-decode.mjs --self-test-runtime
       # 测试报告留档：失败时可直接下载 HTML 报告（否则只有日志尾部行）。
       - name: 上传单测报告（失败时）
         if: failure()

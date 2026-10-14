@@ -55,6 +55,13 @@ const GATES = [
   // #222：所有 mobile-owned /api exact/prefix 路由必须在登记表中，并有本地 auth guard 或窄公开白名单。
   { script: 'check-api-route-auth.mjs', ciApk: true, ciCoord: false, needsSnapshot: false },
   { script: 'check-snapshot-fingerprint.mjs', ciApk: true, ciCoord: false, needsSnapshot: true },
+  // 0.14.7 / task-9 D-4：内嵌快照「真的能解压」门禁。输入 = APK 树内嵌 assets/snapshot.tar.xz（构建期就位），
+  // 判据 = 用与设备同一套 streaming 解码器完整解压一遍（两条构建链在 assemble 之后真跑；CI 无 jar 缓存时
+  // 显式 SKIP 计数，发布链 --require 判红）。needsSnapshot=false：它读的是 APK 树内嵌资产，不是 .deploy-tmp 的 tar。
+  // releaseSink=false：**不能**放在发布链的 2f 段（--run）——那一段跑在注入后快照上，而内嵌资产要等
+  // build-apk-engine.mjs assemble 复制进 APK 树才有；在 2f 跑它验的是上一次构建的残留甚至缺席。
+  // 真实执行点是本地链 assemble 之后的 per-ABI 段（见 scripts/build-apk-013.ps1），sink 断言会核验它确实被调用。
+  { script: 'check-snapshot-decode.mjs', ciApk: true, ciCoord: false, needsSnapshot: false, releaseSink: false, sink: 'local-chain' },
   // G.3（0.14.2-fx-2）下沉：它的输入是 plugins/*/lib（源码面产物），**不是发布 tar** ⇒ 留在发布链上
   // 只是把 43.3s 重复付一遍（apk CI 已真跑，见 pr-gate.yml「工具 output.schema」步）。releaseSink:false
   // 只把它从**发布链的 --run 段**移出，声明仍在（不删门禁），由 apk CI 承担执行。
@@ -483,6 +490,10 @@ for (const gate of RELEASE_GATES) {
   // （绝不冒充绿）。四条调用点已同改为默认档，本聚合入口与它们口径一致。
   // 注意：这里**不自动加 `--require-real`**——构建机/CI 无设备，强加会让发布链必然失败；
   // 「发布前必须在设备上真检」由设备门禁显式跑 `--require-real`（无产物即判红）承担。
+  // 内嵌快照可解压门禁（0.14.7 / task-9 D-4）：输入是 **APK 树内嵌** assets/snapshot.tar.xz。
+  // 发布链这里有一个时序陷阱：2f 段（--run --require）跑在「注入后快照」上，而内嵌资产要等
+  // build-apk-engine.mjs assemble 复制进去才有；本聚合入口若在那段跑，验的是**上一次**构建的残留。
+  // 故：严格档显式要求内嵌资产在场（缺席即判红，不得以 SKIP 结案）；非严格档按其自身计数 SKIP。
   if (gate === 'check-boot-budget.mjs') {
     runGate([join('scripts', gate)], gate + '(real-or-skip)')
     ran += 1

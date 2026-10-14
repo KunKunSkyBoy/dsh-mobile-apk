@@ -961,8 +961,9 @@ internal class EngineStartFlow(private val activity: MainActivity) {
       // Poll for the web service with process-alive semantics (0.13.0 D1): cold boot takes
       // 20-45s (EngineManager START_COOLDOWN_MS comment); the old hard 30s budget fired
       // "引擎启动超时" on slow devices (K20 Pro) even though the engine later started.
-      // Now: as long as the engine process is alive we keep waiting (up to the budget); only a
-      // dead process declares failure (auto-undo path). UI shows a grey "still starting" state.
+      // A concurrent manager can accept the spawn CAS before publishing its child. Wait for
+      // that preparation too, within the same budget; only neither alive nor preparing is DEAD.
+      // UI shows a grey "still starting" state.
       // FX-212.2（E-9）：预算与文案只许有一个来源——ENGINE_BOOT_BUDGET_MS。旧实现把预算改到
       // 90s 却把文案硬编码成 60 - s，首帧即显示「已等待 -30s」；本处不再出现任何字面量秒数。
       val pollBudgetMs = ENGINE_BOOT_BUDGET_MS
@@ -1008,7 +1009,8 @@ internal class EngineStartFlow(private val activity: MainActivity) {
           try { FileIncoming.flushPending(activity) } catch (_: Throwable) {}
           break
         }
-        if (!activity.engineManager.engineProcessAlive()) {
+        if (!activity.engineManager.engineBootMayContinue()) {
+          // 没有存活进程且没有其它 manager 的启动准备请求：此时才确认死亡。
           // 引擎进程已死：宣判失败（自动回退路径），不再空等。
           break
         }
@@ -1022,7 +1024,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         Thread.sleep(pollStepMs)
       }
       if (!isCurrentEngineFlow(generation)) return@Thread
-      if (!booted && !activity.engineManager.engineProcessAlive()) {
+      if (!booted && !activity.engineManager.engineBootMayContinue()) {
         // 任务 19：失败终态落盘。这条路径是设备实测里最密集的失败形态（44 次 t_listen=-1 中
         // 多数是引擎进程死亡），必须留下「当时配置指纹 + 引擎日志状态 + 退出码」。
         //
@@ -1073,7 +1075,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         applyShizukuKeepAlive(generation)
         activity.runOnUiThread { if (isCurrentEngineFlow(generation)) activity.showWeb() }
       } else {
-        // 进程还活着但 90s 内未就绪（异常慢）：灰色提示而非红色错误，不触发回退——
+        // 进程还活着或另一路仍在准备，但 90s 内未就绪（异常慢）：灰色提示而非红色错误，不触发回退——
         // 引擎仍在启动，3s engineMonitorRunnable 会兜底切界面。
         // 0.13.8 #175：终点不再「只提示」——安排一次自动重试（DEGRADED_HTTP 阶梯随后
         // 兜底：若 HTTP 持续失败而端口可连，看门狗会受控重启，不再永久停留灰字）。
@@ -1081,7 +1083,7 @@ internal class EngineStartFlow(private val activity: MainActivity) {
         // 它此前**只写一行 log 且不落盘**（log 只在调试采集器开启时才写），必须进失败终态。
         LogCollector.writeBootFail(
           activity, "boot-budget-exceeded",
-          "引擎进程存活但 " + ENGINE_BOOT_BUDGET_MS / 1000 + "s 预算内 Web 端口未就绪（t_listen=-1 形态）",
+          "引擎进程存活或启动请求仍在准备，但 " + ENGINE_BOOT_BUDGET_MS / 1000 + "s 预算内 Web 端口未就绪（t_listen=-1 形态）",
         )
         LogCollector.log("dsh-shell", "engine boot window exceeded 90s; scheduling retry (half-dead ladder will take over if HTTP stays failing)")
         scheduleEngineRetry(generation)
@@ -1166,13 +1168,24 @@ internal class EngineStartFlow(private val activity: MainActivity) {
     }
   }
 
-  /** Start the foreground service (engine keep-alive + watchdog). */
+  private val foregroundServiceStartQueued = java.util.concurrent.atomic.AtomicBoolean(false)
+
+  /** Request foreground protection after the current Activity lifecycle callback returns. */
   fun startEngineService() {
-    if (!canRunEngineWork() || flowOwnership.destroyed) return
-    try {
-      activity.startForegroundService(Intent(activity, EngineService::class.java))
-    } catch (_: Exception) {
-      // Foreground-service start limits: service will start on next launch.
+    if (!canRunEngineWork() || flowOwnership.destroyed || EngineService.instance != null) return
+    if (!foregroundServiceStartQueued.compareAndSet(false, true)) return
+    // Requesting during onResume starts Android's service deadline while the same
+    // main thread is still restoring views, overlays and picker state. Queue the
+    // request itself so those synchronous lifecycle tasks finish before it starts.
+    activity.window.decorView.post {
+      foregroundServiceStartQueued.set(false)
+      if (!canRunEngineWork() || flowOwnership.destroyed || activity.isFinishing ||
+        activity.isDestroyed || EngineService.instance != null) return@post
+      try {
+        activity.startForegroundService(Intent(activity, EngineService::class.java))
+      } catch (_: Exception) {
+        // Foreground-service start limits: service will start on next launch.
+      }
     }
   }
 

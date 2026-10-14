@@ -298,6 +298,32 @@
         "client-registry-scan-C4"
       ]
     },
+    "dsh-host-frontend-static-SN16": {
+      "source": "runtime-capture",
+      "engine": "0.2.0-rc.2",
+      "package": "@deepseek-ai/dsh-host-frontend-static@0.2.0-rc.2",
+      "provenance": {
+        "captureRecord": "evidence/capture.json",
+        "captureRecordSha256": "998224e32b7c7a8d81c235858dc3523903a5e7894eb31d094f0dd2b039bab638",
+        "evidence": "evidence/graph.json",
+        "evidenceSha256": "8f1db1880a88ad2f6d7cccb65b2b67711828f656aed2ea39cced540cebc4831b"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json",
+        "evidence/capture.json",
+        "evidence/graph.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "19bb095c5175bd5dc6532aa97512e2013a132e5073558ba4b059b8ad5b0f19a2",
+        "package.json": "d9cced4ebc1ac19865d1b89dbd3a5901858203ca3e93e9840ecb9113e663a30b",
+        "evidence/capture.json": "998224e32b7c7a8d81c235858dc3523903a5e7894eb31d094f0dd2b039bab638",
+        "evidence/graph.json": "8f1db1880a88ad2f6d7cccb65b2b67711828f656aed2ea39cced540cebc4831b"
+      },
+      "targets": {},
+      "patchIds": [],
+      "reason": "Device failure witness with package identity and 59-to-69 graph evidence; canonical published-tarball fixture now provides the sole current G2 patch target. Runtime capture evidence and hashes remain verified."
+    },
     "dsh-root-0.2.0-rc.2": {
       "source": "engine-tgz",
       "engine": "0.2.0-rc.2",
@@ -618,6 +644,31 @@
       "patchIds": [
         "typert-registry-scan-C4"
       ]
+    },
+    "dsh-host-frontend-static-0.2.0-rc.2": {
+      "source": "engine-tgz",
+      "engine": "0.2.0-rc.2",
+      "package": "@deepseek-ai/dsh-host-frontend-static@0.2.0-rc.2",
+      "provenance": {
+        "tarballFile": "deepseek-ai-dsh-host-frontend-static-0.2.0-rc.2.tgz",
+        "tarballSha256": "ff052d7fbccdde070a0539b92ca87d147a06908104fc79553d31d013e9953651",
+        "inputKind": "published-tarball"
+      },
+      "files": [
+        "lib/index.js",
+        "package.json"
+      ],
+      "fileSha256": {
+        "lib/index.js": "19bb095c5175bd5dc6532aa97512e2013a132e5073558ba4b059b8ad5b0f19a2",
+        "package.json": "0b66acd7aed6fc64683f253ecef3587fdd09c5a3503356887c0ee241243270b4"
+      },
+      "targets": {
+        "lib/index.js": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/lib/index.js",
+        "package.json": "usr/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-host-frontend-static/package.json"
+      },
+      "patchIds": [
+        "client-index-loader-barrier-G2"
+      ]
     }
   },
   "capture": {
@@ -629,6 +680,6 @@
       ]
     },
     "overlaySha256": "118ac224b49fcdef386b699acda44a08042033cc67bed8b1b4e4af88aef475c7",
-    "registrySha256": "4111a204444634fd3d6778b9666f9996877d10aa9845d320957382f087eef71b"
+    "registrySha256": "97c8c0d0bf42d820c3440cf6af14a9763939580c6b82b2e6c7032e6aecb179b0"
   }
 }

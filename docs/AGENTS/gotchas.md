@@ -1581,4 +1581,141 @@
     **修法升级为三步（覆盖上面两例）**：**执行 → 读回 → 再声明**。读回不通过（目标仍在、状态不符、文件未新生）就**不得写完成态**。这与坑 279 的「`dump; cat` 必须校验目标文件是否新生」、坑 281 自身的「删前先验类型」是同一族：**没有读回的动作，等于没有证据**。
     **归档效力（本条价值不在「差点出事」）**：① 它暴露了「目录 vs 文件」这一级的基本确认被跳过；② 它示范了**归因必须被验证** —— 当事的「命令报错救了我」与「目录名含 `-`」两条归因**先后被推翻**，最终靠变量隔离实测才确证是「漏 `-Recurse` + 非交互 = 从未执行」；**未经验证的因果不能当结论**（本轮规范第 1 条），而「可解释」尤其不等于「已证实」**未经验证的因果不能当结论**（本轮规范第 1 条）。
 
+283. **#0.14.7-注入脚本模板串：`$'` 会同时毁掉「外层 String.replace」与「内层模板求值」——症状是整段脚本静默不执行**：
+现象——在 `dsh-host-web-compat/lib/index.js` 的 `PICKER_SCRIPT` 模板串里新增判据 `if(k.indexOf('__reactProps$')!==0)continue;`，本意只是写一个字符串字面量；
+聚合门禁 `smoke-injections.mjs` 立刻报 **`script #4 parses (9476 bytes) -> Invalid or unexpected token`**。
 
+**真因是两层叠加，缺一不可**：
+① 模板串里的插值起始是 `${`，而 **`$'` 本身不是**，故这一步不算插值——但该脚本体最终要经 `String.replace(seed, body)` 注入 HTML，
+   而 **`String.replace` 的替换串里 `$'` 是特殊模式（插入「匹配位置之后的全部文本」）**，于是 `'__reactProps$'` 被替换成 `'__reactProps<body></body></html>'`，
+   **字符串引号被提前闭合**；
+② 报错点因此出现在**离真凶很远**的位置（实测报在解析产物的第 55 行，真凶在源码 596 行附近的语义），
+   且**整段脚本（含全部 polyfill）一起失效**——本仓注释已记录过同型事故（`join('')` 时期 `Unexpected token 'if'` 静默杀死整个元素）。
+
+**修法**：
+- 模板串里**任何** `$` 都要按「会被当作替换模式/插值」对待；判据字符串**不要以 `$` 紧接引号收尾**（本轮改为 `k.indexOf('__reactProps')!==0`，语义等价、零转义）；
+- 确需保留 `$` 时用 `\u0024` 或重新组织字符串拼接。
+
+**复验证据**：修后 `script #4 parses (9457 bytes)`，compat `npm test` exit 0，新增 `scripts/file-click-defer.test.mjs` 7/7 全绿。
+**为什么值得记**：这类缺陷**编译期不报、运行时整段静默跳过**，只有「逐段 new Function 解析」的注入门禁能挡住；
+这也说明该门禁有**真实判别力**——它当场抓到了实现者自己的错误，**不得绕过门禁去改门禁**（同族见坑 305「门禁自身也是防线」）。
+
+284. **#0.14.7-`visualViewport` 判空只写 `=== null` 会漏掉 `undefined`，并在触摸/键盘路径上抛出「整条适配链静默断掉」的 TypeError**：
+现象——设备控制台反复出现 `TypeError: Cannot read properties of undefined (reading 'height')`，栈顶指向 `KeyboardBoundary.apply`（`@dsh-android/dsh-client-ui-responsive`），
+而该异常**不断打断 `onViewportChange` 与其后的 settle 复算**；页面其余部分看起来正常，属「界面显示正常、用起来不对」那一类。
+真因——`keyboard-boundary.ts` 原写作 `const vv = window.visualViewport` 后 `vv === null ? 0 : Math.round(vv.height)`。
+**`window.visualViewport` 在部分宿主上求值为 `undefined`（不是 `null`）**，`=== null` 不拦，直接读 `.height` 即抛。
+最小复现（CDP 内验证）：`(()=>{const vv=undefined; return vv===null?0:Math.round(vv.height)})()` -> `THREW: Cannot read properties of undefined (reading 'height')`。
+修法——统一用 `window.visualViewport ?? null` 归一化后再判空（同包 `composer-popup-guard.ts`、`top-bar-fold.ts` 早已是双判，**同一仓内三种写法并存本身就是漂移源**）。
+复验——新增 2 条用例（`undefined` / `null` 各一：不抛错且不误设 frame 高度），**并做反证**：退回单判 `as VisualViewport | null` 时新用例确定性判红（1 failed | 9 passed），恢复后 10/10 绿。
+为什么值得记——① 这属**跨特性副作用**：`KeyboardBoundary` 与手势/弹层钳制共处一条 effect 链，一个未捕获异常会连带影响同链逻辑，排查时极易误判成别的功能坏了；
+② **`null` 与 `undefined` 在 JS 里是两个值**，凡按「缺席」判空就必须 `?? null`（或 `== null`）；本仓已有同型正确写法，照抄即可，不要另创第四种。
+
+285. **#0.14.7-「摘要自洽」不等于「能解压」：快照门禁只要不解压，坏资产就能一路进包，直到设备上以解码器异常爆出**：
+现象——用户真机（华为 SCA-AL00）在 0.14.5-fx-2 与 0.14.6 上**都**启动失败，logcat 唯一真因是
+`org.tukaani.xz.CorruptedInputException: Compressed data is corrupt`（栈：`XZCompressorInputStream.read` -> `TarArchiveInputStream.read` -> `SnapshotExtractor.extract`），
+而落盘诊断只有 `boot-fail.log` 的 `error=none(boolean-failure-path) stack=none`——真因只存在于易失的 logcat。
+真因（两条互补，缺一都会复发）——
+① **运行期没有真因出口**：`EngineManager.extractSnapshotTo` 的 `catch` 只写 `Log.e` 就 `return false`，
+异常对象从不挂到 `lastRefreshFailure`；`refreshSnapshotInternal` 里另外两条 `return false`（残留目录挪不开、解压后校验未过）同样只留布尔值。
+调用方 `EngineStartFlow` 只能拿到 null ⇒ `boot-fail.log` 落成 `error=none(boolean-failure-path)`。
+② **构建期没有解压门禁**：`check-snapshot-fingerprint.mjs` 断言的是 `sha256(assets/snapshot.tar.xz) == assets/snapshot.sha256`，
+而**声明值由同一条构建步骤自己写**（`build-apk-engine.mjs` 的 `copyFileSync` + `writeFileSync`），属自证；
+`check-snapshot-asset.ps1` 只比对 APK 内嵌与传入的 xz —— **两条都不解压**。于是「摘要自洽但字节流解不开」的资产可以一路进包。
+顺带两处同族缺陷：`EngineManager` 为取 `fd.length` 打开 `AssetFileDescriptor` 从不 close（真机 logcat 的 `A resource failed to call close.` 即它）；
+`SnapshotExtractor.extract` 的 `tar.close()` 无 try/finally，异常路径上 tar/xz 都不关（而这条正是真机走的那条）。
+修法——① 失败路径的真因全部挂 `lastRefreshFailure`（+ 稳定 code：`snapshot-extract-failed` / `snapshot-stage-incomplete` / `snapshot-stage-residue`），
+复用既有通道，不另造机制；② **解码之前**加一次流式 SHA-256 预检（`SnapshotBundledAsset.digest`，固定 64KB 缓冲、不整读入内存、不解码），
+不一致即 `snapshot-bundled-asset-corrupt` 且 detail 带 `expected=/actual=/bytes=`；③ `use{}` 关 fd、try/finally 关 tar/xz（close 异常走 addSuppressed，不得顶掉真因）；
+④ 新增构建期门禁 `scripts/check-snapshot-decode.mjs`：用**与设备同一套** streaming 解码器（`org.tukaani:xz` + `commons-compress`）完整解压一遍，
+判据 = 无异常 + 条目数 > 0 + 实读字节数 == 条目声明 size 之和（**结尾完整**）；两条链在 `assemble` 之后、per-ABI 段里真跑，失败即 `Deny-Abi`。
+反证（实测，非推断）——把 `assets/snapshot.tar.xz` 复制一份、翻转偏移 97309312 处一个字节，
+`node scripts/check-snapshot-decode.mjs --tar <坏文件>` 判红 exit 1 并打出 `CorruptedInputException: Compressed data is corrupt`；
+同一脚本对真实资产 exit 0（`entries=49521 bytes=710586232`，38s）。**两条链的接线由 `check-gate-skips.mjs` 的反向断言锁住**（声明了却没人跑即判红）。
+为什么值得记——① **门禁的输入必须真正被解码**：只比摘要等于「验证了写摘要的人写的是对的」，对「字节能不能解」零判别力；
+② 诊断缺口与门禁缺口是**同形复发**——「只留一个布尔值」让真因不可归因，而这类缺口在真机上一次都复现不了（用户没有 logcat 可用）；
+③ 「与设备同一套解码器」是这条门禁的全部价值，版本对不上就是在证明别的解码器，属结构性假绿（脚本对账 `build.gradle.kts` 的声明版本，不一致即判红）。
+
+286. **#0.14.7-拖动侧边栏时「内容不完整」：被平移的是收起态的导轨，不是抽屉 —— 上游只按 `data-sidebar-collapsed` 决定渲染内容还是导轨**：
+现象——用户截图：把抽屉往右拖到一半时，屏幕上只出现部分内容（不是完整抽屉），松手后才完整展开。
+真因（真机实测，非推断）——上游 `AppFrame` 用 `sidebarCollapsed` 决定侧栏渲染，而 `SidebarRoot` 只在 `!collapsed` 时挂载宽版内容
+（收起态只渲染导轨，且 `SidebarRoot` 的 `everWide` / `wide` 还会让内容在收起后卸载）。跟手预览层平移的元素**在拖动期间仍是收起态**，
+它平移的是一个**里面没有内容**的盒子 ⇒ 用户看到的就是「拖到一半内容不完整」。
+真机读数（emulator-5562 / Android 15 / 600 CSS px，CDP `Input.dispatchTouchEvent` 合成真实触摸）：
+收起态 `buttons=6 elems=58 innerHTML=11209B`；旧实现拖动中途（`dragging=true`，`inline=translateX(-58.43%)`，rect `left=-169`）**仍是 6/58/11209**（导轨）；
+松手后才变 `19/202/40035`。修复后在同样中途位置直接是 `19/202/40035`。
+修法——**同一帧内的顺序**：确认开合意图后 `beginDrag()`（先关 200ms 过渡）→ `ensureOpen()`（提交展开，让上游立刻挂载完整内容）→ 才写内联位移。
+顺序反了（先写位移后提交）会先闪一下导轨。回退必须用**真正的收起动作**（新增 `closeLeft`）；
+**不要拿 `returnToConversation` 当收起用**——它会顺带 `selectPanel(null)`，语义不同会误伤当前面板选择。
+右栏存在**完全同型**的问题：收起态上游 dockkit 的 `renderTab` 因 `visible=false` 根本不执行，实测右栏仅 31 元素 / 3307B，一并按同一顺序修好。
+连带必修（不改就会自毁）——提交展开后 `resolveAction` 会把**同一次手势**重判成 `return`（因为 `leftOpen()` 已为真），于是自己把刚提交的展开又收回去；
+故 `start.action` 必须在首次确认后**锁定**。
+同批修的两处事件守卫——`preventDefault()` 前必须查 `event.cancelable`：真机曾反复刷
+`Ignored attempt to cancel a touchmove event with cancelable=false`（17 次 touchmove + 1 次 touchend），
+说明原生滚动已接管该次触摸，此时既拦不住也不该拦，必须整条手势作废并**回退已提交的状态**（守卫要排在提交之前，否则会「先提交再复位」）。
+反证与验收——单测抽掉 `ensureOpen` → 16 条判红；只看掉 cancelable 守卫 → 2 条判红；两次均还原复跑全绿。
+真机三档实测：小幅右拖 80px 松手 → 回收起；大幅右拖 220px 松手 → 保持打开；关闭方向拖动中内容不提前消失。
+**中栏不重排的判据**：`grid-template-columns` 计算值全程恒为 `0px 600px 0px`（`mobile-form.css.ts` 用 `!important` 钉死 + 抽屉是 `position:fixed`），
+所以「提前提交展开」不会动中栏布局 —— 这条要测**计算值本身**，只测 `getBoundingClientRect` 不足以证明 `!important` 生效。
+为什么值得记——① 「跟手动画不对」的直觉答案（去调百分比/缓动）在这里是错的：几何完全正确，**错的是被移动的元素里没有内容**；
+② 这类缺陷 DOM 断言看不出来（元素在、坐标也对），只有**按内容形态断言**（元素数 / 内容长度）才能咬住；
+③ 把「提交状态」与「画位移」分成两件事并在同一帧内定序，是这类跟手效果的正确形状，任何一侧单独做都会退化成用户看得见的错。
+
+287. **#0.14.7-「同意与 APK versionCode 绑定」= 每次升级静默清掉用户同意（用户反馈「root 免责声明每次更新怎么都会掉」）**：
+现象——用户群内反馈：每次更新后 root 免责声明都要重新确认（截图实证「还有root免责声明每次更新怎么都会掉」）。
+真因——`RootGrant` 把「已阅读」同意存为 `consentVersionCode`，判据是**必须等于当前 `BuildConfig.VERSION_CODE`**；
+于是版本号 +1 必然让 `consentValid()` 变 false，并连带把开关关掉。更糟的是这条被当成**有意设计**写进了类注释
+（「同意与 versionCode 绑定 ⇒ 升级后 consentValid() 自然为 false，无需迁移逻辑」）——注释的「无需迁移」正是缺陷本身。
+修法——同意改绑**免责声明内容版本** `DISCLAIMER_REVISION`，与 APK 版本号解绑：新键 `consentRevision`，旧键 `consentVersionCode` 降为**只读迁移**。
+迁移刻意只用「旧值 > 0」这一个与版本号无关的事实（老用户同意过的事实必须保住，否则「修这个 bug」本身又会清一次同意）。
+安全属性**一条都不放松**：未同意仍开不了（fail-closed）；取消勾选仍立即撤销同意并同时关闭开关。
+迁移纯逻辑提成 `internal fun migratedConsentRevision(stored, legacy, current)`，JVM 可真值驱动。
+复验——真值驱动用例（旧键 {1,42,100,999,MAX} → 等于当前 revision；旧键 {-1,0} → 0；新键不被旧键覆盖；`(0,0)` → 0 即撤销后不复活）；
+**变异反证**：把纯函数里 `legacyVersionCode > 0` 的返回改成 0 → 该用例判红（1 failed / BUILD FAILED），回滚后全绿。
+**写用例的教训**——初版这条用例写成 `for (legacy in listOf(1,42,100,999)) { assertTrue(legacy > 0) }`，
+断言的是**字面量**、从未调用迁移逻辑，是恒真断言，却顶着一个「keeps any consenting user」的名字。独立验收者当场指出。
+此类断言比没有用例更危险：它制造「已覆盖」的错觉。**凡用例名声称某行为，就必须真的驱动那段代码**；
+提取纯函数是让 Android 依赖重的逻辑可被真值驱动的最省做法。
+另一条固化下来的判据——清洁面：`decision`/`isGranted`/`state` 的源码里**不得再出现 `BuildConfig.VERSION_CODE`**（静态契约用例钉死），
+否则等价于把旧缺陷改回来。
+为什么值得记——① 「绑定版本号」看起来是安全加固（升级后重新确认），实际是**把安全门做成了用户可感知的骚扰**，
+结果用户学会无脑点同意，安全意图反被稀释；② 持久化键的语义变更必须同时处理**老数据的迁移方向**，
+而迁移的职责是「保住既有的合法状态」，不是「用新规则重判历史」；③ 注释里写「无需迁移」往往是缺陷的自我确认。
+
+
+
+
+288. **#0.14.7-浏览器 controller 同步 require gateway 缺模块：host 激活条件不能代替 browser 依赖供给条件**：
+现场在同指纹且无快照事务的冷启动中记录 `require("@deepseek-ai/dsh-api-gateway/client") missed the module table`，
+两个 controller 未激活。交接中「web-app 没有 gateway 行，所以补 insert」的推断不成立：web-app 继承 base，base 已有唯一 typert-gateway。
+Registry 只读取 fiber 存在的行；构造供给方 fiber 未构造而消费者已构造的时序，真实 Registry fixture 的图确实漏掉 gateway，combo factory 同步 require 失败。
+修法：既有 client-registry-scan-C4 增补 G1，仅对未 disabled 的 gateway 及其 typert-registry / client-connection 三个 Loader 行解除 browser 元数据扫描的 host fiber 前提。
+保留四个 controller、唯一 host 行、gateway browser 的 inject 依赖，其它 pending 包继续不进图；disabled/移除仍从实时 Loader 集合消失。
+反证：gateway-client-source-g1.test.mjs 旧图 factory require 失败、新图四个 controller factory 成功，并验证排序、禁用/恢复和 C4 旧树增量升级幂等。
+产物门禁保留C4主marker，并另强制requiredMarkers中的G1；单因素去掉G1注释后整个旧字节产物检查只出现这一项红。build-apk只注入插件，改引擎补丁必须先重建build-snapshot，不能沿用缓存快照。
+该机制反证已通过；具体真机哪条 host 激活分支触发漏项仍未证明。最终源码 APK 的升级与冷启动三层验收由版本收口记录承载。
+
+289. **#0.14.7-模型列表高度反馈导致白条与双态抖动**：
+用户实操取证884条样本证实：键盘展开后max-height归零、绘制高度只剩8px；视口/触发按钮位置不变时菜单仍在258/284px限高之间交替。
+真因：guard把已平移、已限高的菜单bottom重新用于高度上限，同时将topShift加入visibleBottom，混用坐标系；上游scroll定位又读取变化后的offsetHeight。
+修法：body portal以aria-controls关联的触发按钮top减8px作锚点，高度直接由锚点、顶栏与真实可视区决定；写限高后测实际高度，再算相对上游位置的绝对平移；可视区不可测仍跳过纵向钳制。
+源码反证：恢复“用菜单bottom作锚点”后新用例判红；覆盖现场二周期、白条恢复、IME视口过程及高内容重复测量。设备及最终APK结论见版本收口记录，不以单测冒充通过。
+完整AVD补充：模型超过4个才出现二级搜索框，必须点菜单内搜索框唤起真实底部键盘。81模型/inset299px时，SN-1-14内部滚动后上游inline top从325改为88，旧shift=-237未同步重算，最终top=-149。只监听scroll/resize不足：仅对controlled模型portal监听上游top/left/width/height，在MutationObserver微任务中重新定位，忽略自身CSS变量，关闭/卸载取消观察。撤掉定位调用的反证精确重现-149，菜单37用例通过；SN-1-15在AVD同81模型/299px键盘下，内部列表及页面上下原生滚动、搜索清空、重新展开全部通过，连续帧无越界。证据见协调仓final-acceptance/0.14.7/evidence/model-SN15-final/。
+只读dsh checkout的旧ModelSelect没有搜索框，不能代替当前APK安装模块；安装产物代码与用户真实操作为该问题的现状证据。
+
+290. **#0.14.7-touchstart才设置touch-action不能挽救当前手势**：
+旧task11在touchstart改触点style，浏览器已经决定该序列的默认手势，不能靠随后样式修改取消原生滚动。祖先的touch-action也参与交集，旧“不继承所以祖先无效”解释错误。
+修法：手机frame预先生效pan-y pinch-zoom，实际横向溢出容器标记为auto例外，保留代码块/横表原生横滚；纵向达到8px后本序列退出，快甩结算不能绕过方向门控。
+手势之外更新横向溢出标记，预览style更新不触发全树尺寸扫描。单测与变异反证见版本收口记录；真实触摸跟手、斜向、原生纵横滚动仍需最终APK三层验收。
+依据：W3C Pointer Events 2 touch-action规范（https://www.w3.org/TR/pointerevents2/#the-touch-action-css-property）。
+
+
+291. **0.14.7追加交互：横滚扫描与菜单边界透传**：SN15语义开合/菜单几何通过不能证明时序与边界。真机22触摸发现列表到边界后背景/IME变化；MuMu独立CPU采样约9秒中全frame refreshSurfaces约2.8秒。只收集变化子树，触点活动期间不量尺寸，释放后增量更新，并先过滤overflow再读宽度；对实际模型.scrollable设置overscroll-behavior-y:none。后台任务绝对定位ul会被折叠顶栏overflow裁切，需按真实aria-label提升fixed并保留React树。会话切换需在capture阶段识别data-row-key/aria-selected，先拦自动focus再等待真正选中后收起；只在bubble阶段处理会漏掉React同步提交。候选707单测通过，设备及新APK结果见协调仓followup证据，未验不写PASS。
+
+292. **团队重启反馈与前台服务ANR**：用户报告启用团队重启失败，AVD记录boot-budget-exceeded与独立的ForegroundService未及时提升/输入分发ANR；系统旧ANR弹窗可以遮住已健康的WebView，因此CDPframe=true不能当真人可用。EngineService.onCreate应先startForeground再偏好/manager初始化，启动请求排队在当前Activity生命周期回调结束后发出，重复请求合并并重查关闭/销毁状态；不改90秒预算来隐藏错误。真实团队任务在MuMu生成2成员/1共享任务/1后台任务并交叉核验1468，证明该场景工具与UI可用，不能覆盖arm64重启失败。候选Kotlin与新包冷启动尚待收口。
+
+293. **0.14.7 启动 CAS 等待者被误判为进程死亡**：SN16 AVD 单独运行第2次冷启动最终页面69条、团队入口与前台服务健康且无应用ANR，却新增process-died-during-boot，t_boot_start/listen均为-1，日志头是正常native fallback。
+EngineManager的Process已为companion共享，CAS也只允许一个winner spawn；缺陷是loser在STARTING被占时直接返回true，Activity随即拿进程句柄尚未发布的窗口当DEAD并写失败、触发恢复。STARTING持有期间的pre-spawn修复/环境准备可放大该窗口；不是两manager各持有一个不同Process。
+最小修法给Activity独立engineBootMayContinue观察，按STARTING→process→STARTING→process顺序读取，覆盖winner发布Process再释放CAS及一次读取期间完整的CAS acquire/publish/release。watchdog/归属仍用原engineProcessAlive，STARTING不能冒充进程所有权。
+两处Activity死亡判据使用新观察；90s预算、真实退出、失败释放及预算终态落盘保留，预算文案同时覆盖尚在准备的请求。
+EngineBootContinuationTest用latch驱动真实观察函数：winner持CAS但无进程时loser等待，发布后继续，真实退出或失败释放后停止；另精确冻结第一次process旧读，迫使winner在中间完成publish/clear，再验证最后重读不会误判。单测与最终SN17 APK三层证据由统一收口记录承载，不把最终页面恢复健康改写为原失败通过。
