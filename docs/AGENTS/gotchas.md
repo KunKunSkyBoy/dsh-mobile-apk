@@ -1939,7 +1939,6 @@ Stellar 在跑、兼容层正常，本应用却在设置页与工具面一律报
 
 复验证据：`plugins/dsh-android-linux-env/test/linux-environment.test.mjs` 用真实 Cordis 跑异步服务提供/卸载，另注入启动异常和缺依赖反证，断言失败不能留下部分服务；在场用例覆盖平铺/版本化布局、越级目录名、外逃符号链接，以及「先激活 → 手工移除 → 在场转 false 且 install 失败关闭、运行中 scope 不被写回」这条不复活链。`install` 无 manager 时报 bootstrap 原文错误、`rollback` 释放作用域、以及「只有 install/uninstall 齐全才算 manager」各有用例。`settings.section` 的归属反证：`dsh-client-ui-slots` 对 list 槽重复 id 抛错，故壳侧同名分区已于 0.15.0 撤回（见 modules.md），未启用时无入口。
 
-
 317. **引擎侧（Node/Cordis）没有反向通道调用壳侧 Kotlin —— 「让宿主提供原语」必须走客户端或新队列（Linux 资产 IO 实证）**：
 
 现象：设计「引擎侧 bootstrap 需要宿主做下载/解包」时，直觉是「插件直接调 Kotlin 桥方法」。实际结构不支持这个方向：壳侧是**客户端**，长轮询引擎的 `/api/android/ui/pending`（`ControlPoller.kt:48` `BASE = http://127.0.0.1:3080`、`:101-113` 取 `{reqId,op,args}` 执行、`:138` 回投 `/api/android/ui/result`），路由由引擎侧 `registerControlRoutes` 注册（`plugins/dsh-android-bridge/src/control-queue.ts:345-369`）。`app/src/main` 全树**没有** `ServerSocket`/`HttpServer`，唯一直连是 WebView 的 `@JavascriptInterface`。
@@ -1949,3 +1948,24 @@ Stellar 在跑、兼容层正常，本应用却在设置页与工具面一律报
 修法：字节获取走**客户端触发**（页面 `@JavascriptInterface` → 宿主下载/校验/解包），不新增引擎→壳能力、不动镜像面的 `ControlProtocolV2.SUPPORTED_OPS` / `ControlOp`。另一条路（新增一条**非门禁**的资产队列）会引入一个「任何能访问引擎 localhost 的东西都可调用」的新特权原语，得不偿失。
 
 复验证据：`app/src/test/java/com/dsharnessmobile/shell/LinuxAssetIOTest.kt`、`LinuxAssetPrepareTest.kt`（16 例）：来源面（http/非白名单主机/跨仓/latest 非版本化/带 query/多一段路径全部判红）、落点面（绝对路径/`..`/NUL）、摘要与字节数各自的负控、穿越与符号链接逃逸的「不得落地」断言、解压炸弹（条目数/单文件）判红、以及环境不在场/来源不合规时**在起线程之前**拒绝（连网络都不触达）。
+
+318. **会话标题跑马灯的 scroll 会误取消长按拖动**：
+
+现象：长标题会话长按后没有蓝色侧开接收区，短标题却能触发。CDP 事件轨迹显示，手指静止时标题后代连续发送 scroll，400ms 长按尚未达成就被清掉。
+
+真因：侧栏拖动在 document capture 上把所有 scroll 都当成列表滚动。标题 hover 跑马灯也会横向滚动，其事件经同一路径到达，造成误取消。
+
+修法：只在源行祖先容器实际滚动时取消待激活长按；忽略源行及后代的标题滚动。侧开落点先捕获会话身份，再结算排序，避免排序收尾重建节点后丢失打开动作。退出及卸载清除蓝区和动效计时器。
+
+复验证据：`dsh-client-ui-responsive/tests/conversation-dock.spec.ts` 同时覆盖标题滚动不取消、祖先滚动取消、排序收尾移除源节点仍准确打开、提前删除源节点不打开。设备轨迹与热推结论见本轮 PR。
+
+319. **旧 WebView 将自定义协议 URL 当作无 host 路径，子代理原生侧开被拒**：
+
+现象：`new URL('dsh-resource://subagentchat/session/<child>?parent=<parent>&mode=continuable')` 在设备上给出空 hostname，pathname 带 `//subagentchat/`；原生 `subagentchat` 类型据此拒绝有效地址。模拟器上的普通侧开按钮也可复现。
+
+修法：新增对话拖动入口使用自身的 conversation 资源格式，以明确前缀、编码后的路径和 URLSearchParams 解析直接父子地址，不依赖自定义协议的 hostname。子代理身份来自运行时目录，完整核对弹窗行序、层级和标签；身份不一致则不打开。保留原生子代理提供方，避免修改全局 URL 或服务方法。
+
+触摸还须在长按前对会话与子代理行禁止原生文字选择及 HTML drag，否则 WebView 先发 touchcancel，JS 的 dragstart 拦截会来不及。只在 coarse pointer 下禁用这些原生行为，桌面鼠标原有排序不受影响。
+
+复验证据：`dsh-client-ui-responsive/tests/conversation-dock.spec.ts` 覆盖同名条目、目录漂移、父子路由与引用隔离；设备证据与运行树哈希见本轮 PR。
+
